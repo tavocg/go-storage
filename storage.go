@@ -23,6 +23,36 @@ type Storage struct {
 	mu       sync.RWMutex
 }
 
+// LoadState refreshes Storage's tracked byte usage from the backend bucket.
+//
+// Call LoadState after constructing Storage and before using it so in-memory
+// accounting starts from the bucket's current size.
+func (s *Storage) LoadState(ctx context.Context) error {
+	var size int64
+
+	p := s3.NewListObjectsV2Paginator(s.backend, &s3.ListObjectsV2Input{
+		Bucket: aws.String(s.bucket),
+	})
+
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return err
+		}
+
+		for _, obj := range page.Contents {
+			if obj.Size != nil {
+				size += *obj.Size
+			}
+		}
+	}
+
+	s.size = size
+	s.inflight = 0
+
+	return nil
+}
+
 // PutOption configures metadata for a Put request.
 type PutOption func(*ObjectHead)
 

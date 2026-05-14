@@ -23,6 +23,10 @@ import (
 )
 
 func example(ctx context.Context, s *storage.Storage) error {
+	if err := s.LoadState(ctx); err != nil {
+		return err
+	}
+
 	head, err := s.Put(
 		ctx,
 		strings.NewReader("hello world"),
@@ -53,9 +57,3 @@ func example(ctx context.Context, s *storage.Storage) error {
 	return nil
 }
 ```
-
-## Notes
-
-- `WithSizeLimit` sets the maximum number of bytes `Put` will read from the input.
-- The returned `ObjectHead.Size` is the number of bytes actually stored.
-- `Get` returns an `io.ReadCloser`; the caller must close it.
