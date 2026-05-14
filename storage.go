@@ -94,7 +94,7 @@ func (s *Storage) Put(ctx context.Context, body io.Reader, opts ...PutOption) (*
 	return &oh, nil
 }
 
-func (s *Storage) Get(ctx context.Context, head ObjectHead) (io.Reader, error) {
+func (s *Storage) Get(ctx context.Context, head ObjectHead) (io.ReadCloser, error) {
 	obj, err := s.backend.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(head.Key),
