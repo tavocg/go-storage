@@ -1,6 +1,6 @@
 # go-storage
 
-Small S3-backed object storage wrapper with basic byte accounting.
+Golang S3-backed object storage wrapper with byte accounting.
 
 ## Usage
 
