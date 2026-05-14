@@ -25,8 +25,11 @@ type hashingLimitReader struct {
 }
 
 const (
+	// ErrMaxBytesReached indicates that reading more bytes would exceed the
+	// configured storage limit.
 	ErrMaxBytesReached = errStr("maxBytes reached")
-	ErrObjectNotFound  = errStr("object not found")
+	// ErrObjectNotFound indicates that an object does not exist.
+	ErrObjectNotFound = errStr("object not found")
 )
 
 func randomUUID() (string, error) {
