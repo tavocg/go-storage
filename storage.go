@@ -116,7 +116,7 @@ func (s *Storage) Put(ctx context.Context, body io.Reader, opts ...PutOption) (*
 // Get opens an object body for reading.
 //
 // The caller must close the returned reader.
-func (s *Storage) Get(ctx context.Context, head ObjectHead) (io.ReadCloser, error) {
+func (s *Storage) Get(ctx context.Context, head *ObjectHead) (io.ReadCloser, error) {
 	obj, err := s.backend.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(head.Key),
@@ -131,7 +131,7 @@ func (s *Storage) Get(ctx context.Context, head ObjectHead) (io.ReadCloser, erro
 //
 // If head.Size is known, Delete also subtracts those bytes from the tracked
 // storage usage.
-func (s *Storage) Delete(ctx context.Context, head ObjectHead) error {
+func (s *Storage) Delete(ctx context.Context, head *ObjectHead) error {
 	if _, err := s.backend.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(head.Key),
