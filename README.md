@@ -19,7 +19,7 @@ import (
 	"io"
 	"strings"
 
-	storage "github.com/tavocg/go-storage"
+	"github.com/tavocg/go-storage"
 )
 
 func example(ctx context.Context, s *storage.Storage) error {
