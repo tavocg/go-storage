@@ -4,12 +4,6 @@ Golang S3-backed object storage wrapper with byte accounting.
 
 ## Usage
 
-This package currently exposes the storage operations, but not a constructor.
-That means your code needs to obtain a `*storage.Storage` from inside this
-module or from a constructor you add later.
-
-Minimal usage looks like this:
-
 ```go
 package main
 
