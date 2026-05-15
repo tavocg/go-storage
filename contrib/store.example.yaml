@@ -3,11 +3,27 @@
 # All options here are set to the defaults used by the CLI. If no config file
 # is found, those same defaults still apply.
 
-# Storage backend to use. Currently supported: s3.
+# Storage backend to use. Currently supported: fs, s3.
 # Override with:
+#   STORE_BACKEND=fs store put ./file.txt
+#   store --backend fs put ./file.txt
 #   STORE_BACKEND=s3 store put ./file.txt
 #   store --backend s3 put ./file.txt
 backend: s3
+
+# Local filesystem backend settings.
+fs:
+  # Root directory where object files are stored. Required when backend=fs.
+  # Override with:
+  #   STORE_FS_ROOT=/var/lib/store store put ./file.txt
+  #   store --fs-root /var/lib/store put ./file.txt
+  root: ""
+
+  # Maximum aggregate stored bytes tracked by the storage layer.
+  # Override with:
+  #   STORE_FS_MAX_SIZE=10737418240 store put ./file.txt
+  #   store --fs-max-size 10737418240 put ./file.txt
+  max-size: 10737418240
 
 # Amazon S3 backend settings.
 s3:

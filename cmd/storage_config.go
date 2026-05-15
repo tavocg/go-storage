@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/viper"
 
 	storage "github.com/tavocg/go-storage"
+	fsbackend "github.com/tavocg/go-storage/backends/fs"
 	s3backend "github.com/tavocg/go-storage/backends/s3"
 )
 
@@ -21,6 +22,8 @@ const (
 
 func initStorageConfig(cmd *cobra.Command) {
 	viper.SetDefault("backend", defaultBackend)
+	viper.SetDefault("fs.root", "")
+	viper.SetDefault("fs.max-size", defaultS3MaxSize)
 	viper.SetDefault("s3.bucket", "")
 	viper.SetDefault("s3.access-key-id", "")
 	viper.SetDefault("s3.secret-access-key", "")
@@ -30,6 +33,8 @@ func initStorageConfig(cmd *cobra.Command) {
 
 	flags := cmd.PersistentFlags()
 	flags.String("backend", defaultBackend, "storage backend to use")
+	flags.String("fs-root", "", "filesystem backend root directory")
+	flags.Int64("fs-max-size", defaultS3MaxSize, "maximum total stored bytes for filesystem backend")
 	flags.String("s3-bucket", "", "S3 bucket name")
 	flags.String("s3-access-key-id", "", "S3 access key ID")
 	flags.String("s3-secret-access-key", "", "S3 secret access key")
@@ -38,6 +43,8 @@ func initStorageConfig(cmd *cobra.Command) {
 	flags.Int64("s3-max-size", defaultS3MaxSize, "maximum total stored bytes")
 
 	mustBindFlag("backend", cmd, "backend")
+	mustBindFlag("fs.root", cmd, "fs-root")
+	mustBindFlag("fs.max-size", cmd, "fs-max-size")
 	mustBindFlag("s3.bucket", cmd, "s3-bucket")
 	mustBindFlag("s3.access-key-id", cmd, "s3-access-key-id")
 	mustBindFlag("s3.secret-access-key", cmd, "s3-secret-access-key")
@@ -48,11 +55,26 @@ func initStorageConfig(cmd *cobra.Command) {
 
 func newStorageFromConfig(ctx context.Context) (*storage.Storage, error) {
 	switch backend := strings.ToLower(strings.TrimSpace(viper.GetString("backend"))); backend {
+	case "fs":
+		return newFSStorage(ctx)
 	case "", "s3":
 		return newS3Storage(ctx)
 	default:
 		return nil, fmt.Errorf("unsupported backend %q", backend)
 	}
+}
+
+func newFSStorage(ctx context.Context) (*storage.Storage, error) {
+	optFuncs := make([]func(*fsbackend.Options), 0, 2)
+
+	if value, ok := configuredString("fs.root", "fs-root", "STORE_FS_ROOT"); ok {
+		optFuncs = append(optFuncs, fsbackend.WithRoot(value))
+	}
+	if value, ok := configuredInt64("fs.max-size", "fs-max-size", "STORE_FS_MAX_SIZE"); ok {
+		optFuncs = append(optFuncs, fsbackend.WithMaxSize(value))
+	}
+
+	return fsbackend.New(ctx, optFuncs...)
 }
 
 func newS3Storage(ctx context.Context) (*storage.Storage, error) {
