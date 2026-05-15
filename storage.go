@@ -23,6 +23,16 @@ type Storage struct {
 	mu       sync.RWMutex
 }
 
+// New returns a Storage that uses backend to store objects in bucket and
+// enforces maxSize as the total allowed byte usage.
+func New(backend Backend, bucket string, maxSize int64) *Storage {
+	return &Storage{
+		backend: backend,
+		bucket:  bucket,
+		maxSize: maxSize,
+	}
+}
+
 // LoadState refreshes Storage's tracked byte usage from the backend bucket.
 //
 // Call LoadState after constructing Storage and before using it so in-memory
