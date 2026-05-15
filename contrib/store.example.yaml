@@ -1,0 +1,42 @@
+# store.yaml - Configuration for store
+#
+# All options here are set to the defaults used by the CLI. If no config file
+# is found, those same defaults still apply.
+
+# Storage backend to use. Currently supported: s3.
+# Override with:
+#   STORE_BACKEND=s3 store put ./file.txt
+#   store --backend s3 put ./file.txt
+backend: s3
+
+# Amazon S3 backend settings.
+s3:
+  # Bucket name. Required unless another source such as AWS_BUCKET provides it.
+  # Override with:
+  #   STORE_S3_BUCKET=my-bucket store put ./file.txt
+  #   store --s3-bucket my-bucket put ./file.txt
+  bucket: ""
+
+  # Access key ID. Optional when using the normal AWS credential chain.
+  # Override with:
+  #   STORE_S3_ACCESS_KEY_ID=AKIA... store put ./file.txt
+  #   store --s3-access-key-id AKIA... put ./file.txt
+  access-key-id: ""
+
+  # Secret access key. Optional when using the normal AWS credential chain.
+  # Override with:
+  #   STORE_S3_SECRET_ACCESS_KEY=change-me store put ./file.txt
+  #   store --s3-secret-access-key change-me put ./file.txt
+  secret-access-key: ""
+
+  # AWS region.
+  # Override with:
+  #   STORE_S3_REGION=us-east-1 store put ./file.txt
+  #   store --s3-region us-east-1 put ./file.txt
+  region: auto
+
+  # Maximum aggregate stored bytes tracked by the storage layer.
+  # Override with:
+  #   STORE_S3_MAX_SIZE=10737418240 store put ./file.txt
+  #   store --s3-max-size 10737418240 put ./file.txt
+  max-size: 10737418240

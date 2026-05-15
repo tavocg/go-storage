@@ -55,19 +55,19 @@ func newStorageFromConfig(ctx context.Context) (*storage.Storage, error) {
 func newS3Storage(ctx context.Context) (*storage.Storage, error) {
 	optFuncs := make([]func(*s3backend.Options), 0, 5)
 
-	if value, ok := configuredString("s3.bucket", "s3-bucket", "STORAGE_S3_BUCKET"); ok {
+	if value, ok := configuredString("s3.bucket", "s3-bucket", "STORE_S3_BUCKET"); ok {
 		optFuncs = append(optFuncs, s3backend.WithBucket(value))
 	}
-	if value, ok := configuredString("s3.access-key-id", "s3-access-key-id", "STORAGE_S3_ACCESS_KEY_ID"); ok {
+	if value, ok := configuredString("s3.access-key-id", "s3-access-key-id", "STORE_S3_ACCESS_KEY_ID"); ok {
 		optFuncs = append(optFuncs, s3backend.WithAccessKey(value))
 	}
-	if value, ok := configuredString("s3.secret-access-key", "s3-secret-access-key", "STORAGE_S3_SECRET_ACCESS_KEY"); ok {
+	if value, ok := configuredString("s3.secret-access-key", "s3-secret-access-key", "STORE_S3_SECRET_ACCESS_KEY"); ok {
 		optFuncs = append(optFuncs, s3backend.WithSecretKey(value))
 	}
-	if value, ok := configuredString("s3.region", "s3-region", "STORAGE_S3_REGION"); ok {
+	if value, ok := configuredString("s3.region", "s3-region", "STORE_S3_REGION"); ok {
 		optFuncs = append(optFuncs, s3backend.WithRegion(value))
 	}
-	if value, ok := configuredInt64("s3.max-size", "s3-max-size", "STORAGE_S3_MAX_SIZE"); ok {
+	if value, ok := configuredInt64("s3.max-size", "s3-max-size", "STORE_S3_MAX_SIZE"); ok {
 		optFuncs = append(optFuncs, s3backend.WithMaxSize(value))
 	}
 

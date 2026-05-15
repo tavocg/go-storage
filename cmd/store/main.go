@@ -15,9 +15,10 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
-// Package cmd implements the cli interface for Storage
-package cmd
+package main
+
+import "github.com/tavocg/go-storage/cmd"
 
 func main() {
-	Execute()
+	cmd.Execute()
 }

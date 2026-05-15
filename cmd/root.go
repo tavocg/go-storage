@@ -32,9 +32,9 @@ var cfgFile string
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "go-storage",
+	Use:   "store",
 	Short: "Store, fetch, and delete objects through the configured backend",
-	Long: `go-storage is a thin CLI for the storage package in this repository.
+	Long: `store is a thin CLI for the storage package in this repository.
 
 Backend settings can come from a config file, environment variables, or flags.
 The same backend configuration is shared by the put, get, and delete commands.`,
@@ -52,7 +52,7 @@ func Execute() {
 
 func init() {
 	cobra.OnInitialize(initConfig)
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file path (defaults to storage.yaml in standard config directories)")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file path (defaults to store.yaml in standard config directories)")
 	initStorageConfig(rootCmd)
 }
 
@@ -65,10 +65,10 @@ func initConfig() {
 		}
 
 		viper.SetConfigType("yaml")
-		viper.SetConfigName("storage")
+		viper.SetConfigName("store")
 	}
 
-	viper.SetEnvPrefix("STORAGE")
+	viper.SetEnvPrefix("STORE")
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	viper.AutomaticEnv()
 
