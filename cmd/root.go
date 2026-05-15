@@ -17,8 +17,12 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -64,26 +68,50 @@ func init() {
 	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }
 
-// initConfig reads in config file and ENV variables if set.
 func initConfig() {
 	if cfgFile != "" {
-		// Use config file from the flag.
 		viper.SetConfigFile(cfgFile)
 	} else {
-		// Find home directory.
-		home, err := os.UserHomeDir()
-		cobra.CheckErr(err)
+		for _, d := range findConfigDirs() {
+			viper.AddConfigPath(d)
+		}
 
-		// Search config in home directory with name ".go-storage" (without extension).
-		viper.AddConfigPath(home)
 		viper.SetConfigType("yaml")
-		viper.SetConfigName(".go-storage")
+		viper.SetConfigName("storage")
 	}
 
-	viper.AutomaticEnv() // read in environment variables that match
+	viper.SetEnvPrefix("APP")
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	viper.AutomaticEnv()
 
-	// If a config file is found, read it in.
-	if err := viper.ReadInConfig(); err == nil {
-		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
+	err := viper.ReadInConfig()
+	var notFound viper.ConfigFileNotFoundError
+	if err != nil && !errors.As(err, &notFound) {
+		cobra.CheckErr(err)
 	}
+}
+
+func findConfigDirs() []string {
+	dirs := []string{}
+
+	if wd, err := os.Getwd(); err == nil && wd != "" {
+		dirs = append(dirs, wd)
+	}
+
+	if xdgCfgDir := os.Getenv("XDG_CONFIG_HOME"); xdgCfgDir != "" {
+		if !slices.Contains(dirs, xdgCfgDir) {
+			dirs = append(dirs, xdgCfgDir)
+		}
+	}
+
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		defCfgDir := filepath.Join(home, ".config")
+		if !slices.Contains(dirs, defCfgDir) {
+			dirs = append(dirs, defCfgDir)
+		}
+	}
+
+	dirs = append(dirs, "/usr/local/etc", "/etc")
+
+	return dirs
 }
