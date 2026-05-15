@@ -21,6 +21,7 @@ type Options struct {
 	AccessKeyID     string `env:"AWS_ACCESS_KEY_ID"`
 	SecretAccessKey string `env:"AWS_SECRET_ACCESS_KEY"`
 	Region          string `env:"AWS_REGION,auto"`
+	Endpoint        string `env:"AWS_ENDPOINT_URL_S3"`
 	MaxSize         int64  `env:"STORAGE_MAX_SIZE,10737418240"` // 1GB
 }
 
@@ -48,6 +49,12 @@ func WithRegion(region string) func(*Options) {
 	}
 }
 
+func WithEndpoint(endpoint string) func(*Options) {
+	return func(o *Options) {
+		o.Endpoint = endpoint
+	}
+}
+
 func WithMaxSize(maxSize int64) func(*Options) {
 	return func(o *Options) {
 		o.MaxSize = maxSize
@@ -64,12 +71,23 @@ func New(ctx context.Context, optFuncs ...func(*Options)) (*storage.Storage, err
 		return nil, err
 	}
 
-	cfg, err := config.LoadDefaultConfig(ctx)
+	loadOpts := make([]func(*config.LoadOptions) error, 0, 1)
+	if endpoint := strings.TrimSpace(opts.Endpoint); endpoint != "" {
+		loadOpts = append(loadOpts, config.WithBaseEndpoint(endpoint))
+	}
+
+	cfg, err := config.LoadDefaultConfig(ctx, loadOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("load AWS config: %w", err)
 	}
 
-	store := storage.New(s3.NewFromConfig(cfg), opts.Bucket, opts.MaxSize)
+	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		if strings.TrimSpace(opts.Endpoint) != "" {
+			o.UsePathStyle = true
+		}
+	})
+
+	store := storage.New(client, opts.Bucket, opts.MaxSize)
 	if err := store.LoadState(ctx); err != nil {
 		return nil, fmt.Errorf("load storage state: %w", err)
 	}

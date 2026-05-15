@@ -25,6 +25,7 @@ func initStorageConfig(cmd *cobra.Command) {
 	viper.SetDefault("s3.access-key-id", "")
 	viper.SetDefault("s3.secret-access-key", "")
 	viper.SetDefault("s3.region", defaultS3Region)
+	viper.SetDefault("s3.endpoint", "")
 	viper.SetDefault("s3.max-size", defaultS3MaxSize)
 
 	flags := cmd.PersistentFlags()
@@ -33,6 +34,7 @@ func initStorageConfig(cmd *cobra.Command) {
 	flags.String("s3-access-key-id", "", "S3 access key ID")
 	flags.String("s3-secret-access-key", "", "S3 secret access key")
 	flags.String("s3-region", defaultS3Region, "S3 region")
+	flags.String("s3-endpoint", "", "S3-compatible endpoint URL")
 	flags.Int64("s3-max-size", defaultS3MaxSize, "maximum total stored bytes")
 
 	mustBindFlag("backend", cmd, "backend")
@@ -40,6 +42,7 @@ func initStorageConfig(cmd *cobra.Command) {
 	mustBindFlag("s3.access-key-id", cmd, "s3-access-key-id")
 	mustBindFlag("s3.secret-access-key", cmd, "s3-secret-access-key")
 	mustBindFlag("s3.region", cmd, "s3-region")
+	mustBindFlag("s3.endpoint", cmd, "s3-endpoint")
 	mustBindFlag("s3.max-size", cmd, "s3-max-size")
 }
 
@@ -53,7 +56,7 @@ func newStorageFromConfig(ctx context.Context) (*storage.Storage, error) {
 }
 
 func newS3Storage(ctx context.Context) (*storage.Storage, error) {
-	optFuncs := make([]func(*s3backend.Options), 0, 5)
+	optFuncs := make([]func(*s3backend.Options), 0, 6)
 
 	if value, ok := configuredString("s3.bucket", "s3-bucket", "STORE_S3_BUCKET"); ok {
 		optFuncs = append(optFuncs, s3backend.WithBucket(value))
@@ -66,6 +69,9 @@ func newS3Storage(ctx context.Context) (*storage.Storage, error) {
 	}
 	if value, ok := configuredString("s3.region", "s3-region", "STORE_S3_REGION"); ok {
 		optFuncs = append(optFuncs, s3backend.WithRegion(value))
+	}
+	if value, ok := configuredString("s3.endpoint", "s3-endpoint", "STORE_S3_ENDPOINT"); ok {
+		optFuncs = append(optFuncs, s3backend.WithEndpoint(value))
 	}
 	if value, ok := configuredInt64("s3.max-size", "s3-max-size", "STORE_S3_MAX_SIZE"); ok {
 		optFuncs = append(optFuncs, s3backend.WithMaxSize(value))

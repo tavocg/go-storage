@@ -51,3 +51,28 @@ func example(ctx context.Context, s *storage.Storage) error {
 	return nil
 }
 ```
+
+## Custom Endpoints
+
+For S3-compatible providers such as Cloudflare R2, use the S3 backend package
+and pass a custom endpoint:
+
+```go
+package main
+
+import (
+	"context"
+
+	s3backend "github.com/tavocg/go-storage/backends/s3"
+)
+
+func newStore(ctx context.Context) error {
+	_, err := s3backend.New(
+		ctx,
+		s3backend.WithBucket("personal"),
+		s3backend.WithRegion("auto"),
+		s3backend.WithEndpoint("https://11bf4a9e76b5bde4ca62baa852624281.r2.cloudflarestorage.com"),
+	)
+	return err
+}
+```

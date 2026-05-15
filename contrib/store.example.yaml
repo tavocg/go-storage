@@ -35,6 +35,13 @@ s3:
   #   store --s3-region us-east-1 put ./file.txt
   region: auto
 
+  # S3-compatible endpoint URL. Leave empty to use the normal AWS resolver.
+  # Useful for Cloudflare R2, MinIO, Ceph, and similar services.
+  # Override with:
+  #   STORE_S3_ENDPOINT=https://<accountid>.r2.cloudflarestorage.com store put ./file.txt
+  #   store --s3-endpoint https://<accountid>.r2.cloudflarestorage.com put ./file.txt
+  endpoint: ""
+
   # Maximum aggregate stored bytes tracked by the storage layer.
   # Override with:
   #   STORE_S3_MAX_SIZE=10737418240 store put ./file.txt
