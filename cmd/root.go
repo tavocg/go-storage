@@ -34,7 +34,7 @@ var cfgFile string
 var rootCmd = &cobra.Command{
 	Use:   "store",
 	Short: "Store, fetch, and delete objects through the configured backend",
-	Long: `store is a thin CLI for the storage package in this repository.
+	Long: `store is a thin CLI for the storage.
 
 Backend settings can come from a config file, environment variables, or flags.
 The same backend configuration is shared by the put, get, and delete commands.`,
