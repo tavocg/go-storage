@@ -85,6 +85,13 @@ func WithSizeLimit(size int64) PutOption {
 	}
 }
 
+// WithContentType sets the stored content type metadata for Put.
+func WithContentType(contentType string) PutOption {
+	return func(o *ObjectHead) {
+		o.Type = contentType
+	}
+}
+
 // Put stores body in the configured bucket and returns the resulting object
 // metadata.
 //
