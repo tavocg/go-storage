@@ -52,7 +52,7 @@ func Execute() {
 
 func init() {
 	cobra.OnInitialize(initConfig)
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file path (defaults to store.yaml in standard config directories)")
+	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file path (defaults to store.yaml in standard config directories)")
 	initStorageConfig(rootCmd)
 }
 
