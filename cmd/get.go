@@ -5,36 +5,92 @@ Copyright © 2026 NAME HERE <EMAIL ADDRESS>
 package cmd
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+
+	storage "github.com/tavocg/go-storage"
 )
 
 // getCmd represents the get command
 var getCmd = &cobra.Command{
-	Use:   "get",
-	Short: "A brief description of your command",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example:
+	Use:   "get KEY [DEST]",
+	Short: "Download an object from the configured backend",
+	Long: `Fetch KEY from the configured storage backend.
 
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("get called")
+If DEST is omitted or "-", the object body is written to stdout.`,
+	Args: cobra.RangeArgs(1, 2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runGet(cmd.Context(), cmd, args)
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(getCmd)
 
-	// Here you will define your flags and configuration settings.
+	getCmd.Flags().StringP("output", "o", "", "destination file path, or - for stdout")
+	mustBindFlag("get.output", getCmd, "output")
+}
 
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// getCmd.PersistentFlags().String("foo", "", "A help for foo")
+func runGet(ctx context.Context, cmd *cobra.Command, args []string) error {
+	dest := ""
+	if len(args) == 2 {
+		dest = args[1]
+	}
 
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// getCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	flagDest := strings.TrimSpace(viper.GetString("get.output"))
+	if dest != "" && flagDest != "" {
+		return fmt.Errorf("destination provided both as argument and --output")
+	}
+	if dest == "" {
+		dest = flagDest
+	}
+
+	store, err := newStorageFromConfig(ctx)
+	if err != nil {
+		return err
+	}
+
+	body, err := store.Get(ctx, &storage.ObjectHead{Key: args[0]})
+	if err != nil {
+		return err
+	}
+	defer body.Close()
+
+	writer, closer, err := openGetDestination(cmd, dest)
+	if err != nil {
+		return err
+	}
+	if closer != nil {
+		defer closer.Close()
+	}
+
+	_, err = io.Copy(writer, body)
+	return err
+}
+
+func openGetDestination(cmd *cobra.Command, dest string) (io.Writer, io.Closer, error) {
+	if dest == "" || dest == "-" {
+		return cmd.OutOrStdout(), nil, nil
+	}
+
+	dir := filepath.Dir(dest)
+	if dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	file, err := os.Create(dest)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return file, file, nil
 }
