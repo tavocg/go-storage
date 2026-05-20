@@ -5,7 +5,6 @@ package storage
 import (
 	"context"
 	"io"
-	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -16,11 +15,7 @@ import (
 type Storage struct {
 	backend Backend
 	bucket  string
-	maxSize int64
-
-	size     int64
-	inflight int64
-	mu       sync.RWMutex
+	state   *mutableState
 }
 
 // New returns a Storage that uses backend to store objects in bucket and
@@ -29,7 +24,7 @@ func New(backend Backend, bucket string, maxSize int64) *Storage {
 	return &Storage{
 		backend: backend,
 		bucket:  bucket,
-		maxSize: maxSize,
+		state:   newMutableState(maxSize),
 	}
 }
 
@@ -38,6 +33,7 @@ func New(backend Backend, bucket string, maxSize int64) *Storage {
 // Call LoadState after constructing Storage and before using it so in-memory
 // accounting starts from the bucket's current size.
 func (s *Storage) LoadState(ctx context.Context) error {
+	objects := make(map[string]int64)
 	var size int64
 
 	p := s3.NewListObjectsV2Paginator(s.backend, &s3.ListObjectsV2Input{
@@ -51,14 +47,14 @@ func (s *Storage) LoadState(ctx context.Context) error {
 		}
 
 		for _, obj := range page.Contents {
-			if obj.Size != nil {
-				size += *obj.Size
-			}
+			key := aws.ToString(obj.Key)
+			objectSize := aws.ToInt64(obj.Size)
+			objects[key] = objectSize
+			size += objectSize
 		}
 	}
 
-	s.size = size
-	s.inflight = 0
+	s.state.load(objects, size)
 
 	return nil
 }
@@ -113,18 +109,19 @@ func (s *Storage) Put(ctx context.Context, body io.Reader, opts ...PutOption) (*
 		oh.Key = uuid
 	}
 
+	reservation, err := s.state.startPut(oh.Key, oh.Size)
+	if err != nil {
+		return nil, err
+	}
+
 	var hlr *hashingLimitReader
-	reserved := int64(0)
 	if oh.Size > 0 {
 		// Known-size uploads reserve once and use a bounded reader.
-		if err := s.reserveBytes(oh.Size); err != nil {
-			return nil, err
-		}
-		reserved = oh.Size
 		hlr = newHashingLimitReader(body, oh.Size)
 	} else {
-		// Unknown-size uploads reserve incrementally as bytes are read.
-		hlr = newHashingLimitReader(body, -1, s.reserveBytes)
+		// Unknown-size uploads reserve incrementally only after they grow
+		// beyond the size of the object they overwrite.
+		hlr = newHashingLimitReader(body, -1, reservation.consume)
 	}
 
 	input := &s3.PutObjectInput{
@@ -140,20 +137,11 @@ func (s *Storage) Put(ctx context.Context, body io.Reader, opts ...PutOption) (*
 	}
 
 	if _, err := s.backend.PutObject(ctx, input); err != nil {
-		if reserved > 0 {
-			s.releaseBytes(reserved)
-		} else {
-			s.releaseBytes(hlr.Size())
-		}
+		s.state.abortPut(reservation)
 		return nil, err
 	}
 
-	if reserved > 0 {
-		// Release any unused portion of the up-front reservation before
-		// converting the consumed bytes into committed size.
-		s.releaseBytes(reserved - hlr.Size())
-	}
-	s.commitBytes(hlr.Size())
+	s.state.finishPut(reservation, hlr.Size())
 	oh.Size = hlr.Size()
 	oh.SHA256 = hlr.SHA256()
 
@@ -174,9 +162,7 @@ func (s *Storage) Get(ctx context.Context, head *ObjectHead) (io.ReadCloser, err
 	return obj.Body, err
 }
 
-// Delete removes an object from the bucket.
-//
-// If head.Size is known, Delete also subtracts those bytes from the tracked
+// Delete removes an object from the bucket and subtracts its tracked size from
 // storage usage.
 func (s *Storage) Delete(ctx context.Context, head *ObjectHead) error {
 	if _, err := s.backend.DeleteObject(ctx, &s3.DeleteObjectInput{
@@ -189,9 +175,7 @@ func (s *Storage) Delete(ctx context.Context, head *ObjectHead) error {
 		return err
 	}
 
-	if head.Size > 0 {
-		s.removeBytes(head.Size)
-	}
+	s.state.removeObject(head.Key, head.Size)
 
 	return nil
 }
