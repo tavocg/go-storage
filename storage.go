@@ -96,7 +96,7 @@ func WithContentType(contentType string) PutOption {
 // each read. The returned ObjectHead.Size is the number of bytes actually
 // stored.
 func (s *Storage) Put(ctx context.Context, body io.Reader, opts ...PutOption) (*ObjectHead, error) {
-	oh := ObjectHead{}
+	oh := ObjectHead{Size: -1}
 	for _, opt := range opts {
 		opt(&oh)
 	}
@@ -115,8 +115,8 @@ func (s *Storage) Put(ctx context.Context, body io.Reader, opts ...PutOption) (*
 	}
 
 	var hlr *hashingLimitReader
-	if oh.Size > 0 {
-		// Known-size uploads reserve once and use a bounded reader.
+	if oh.Size >= 0 {
+		// Size-limited uploads reserve once and use a bounded reader.
 		hlr = newHashingLimitReader(body, oh.Size)
 	} else {
 		// Unknown-size uploads reserve incrementally only after they grow
@@ -131,9 +131,6 @@ func (s *Storage) Put(ctx context.Context, body io.Reader, opts ...PutOption) (*
 	}
 	if oh.Type != "" {
 		input.ContentType = aws.String(oh.Type)
-	}
-	if oh.Size > 0 {
-		input.ContentLength = aws.Int64(oh.Size)
 	}
 
 	if _, err := s.backend.PutObject(ctx, input); err != nil {

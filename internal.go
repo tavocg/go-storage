@@ -71,11 +71,11 @@ func (s *mutableState) startPut(key string, knownSize int64) (*putReservation, e
 		previousSize: s.objects[key],
 	}
 
-	if knownSize > 0 {
+	if knownSize >= 0 {
 		delta := knownSize - reservation.previousSize
 		if delta > 0 {
 			if s.size+s.inflight+delta > s.maxSize {
-				return nil, errStr("max bytes reached")
+				return nil, ErrMaxBytesReached
 			}
 			s.inflight += delta
 			reservation.reserved = delta
@@ -126,7 +126,7 @@ func (r *putReservation) consume(n int64) error {
 	defer r.state.mu.Unlock()
 
 	if r.state.size+r.state.inflight+additional > r.state.maxSize {
-		return errStr("max bytes reached")
+		return ErrMaxBytesReached
 	}
 
 	r.state.inflight += additional

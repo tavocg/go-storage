@@ -17,10 +17,6 @@ import (
 )
 
 func example(ctx context.Context, s *storage.Storage) error {
-	if err := s.LoadState(ctx); err != nil {
-		return err
-	}
-
 	head, err := s.Put(
 		ctx,
 		strings.NewReader("hello world"),
