@@ -5,6 +5,7 @@ go 1.26.1
 require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.1
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.101.0
+	github.com/tavocg/go-storage v0.0.0-20260523051731-da38ffa15b62
 )
 
 require (
