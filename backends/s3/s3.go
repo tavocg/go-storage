@@ -18,12 +18,13 @@ import (
 
 type Options struct {
 	//                           KEY,default
-	Bucket          string `env:"AWS_BUCKET"`
-	AccessKeyID     string `env:"AWS_ACCESS_KEY_ID"`
-	SecretAccessKey string `env:"AWS_SECRET_ACCESS_KEY"`
-	Region          string `env:"AWS_REGION,auto"`
-	Endpoint        string `env:"AWS_ENDPOINT_URL_S3"`
-	MaxSize         int64  `env:"STORAGE_MAX_SIZE,10737418240"` // 1GB
+	Bucket                     string `env:"AWS_BUCKET"`
+	AccessKeyID                string `env:"AWS_ACCESS_KEY_ID"`
+	SecretAccessKey            string `env:"AWS_SECRET_ACCESS_KEY"`
+	Region                     string `env:"AWS_REGION,auto"`
+	Endpoint                   string `env:"AWS_ENDPOINT_URL_S3"`
+	RequestChecksumCalculation aws.RequestChecksumCalculation
+	MaxSize                    int64 `env:"STORAGE_MAX_SIZE,10737418240"` // 1GB
 }
 
 func WithBucket(bucket string) func(*Options) {
@@ -56,6 +57,12 @@ func WithEndpoint(endpoint string) func(*Options) {
 	}
 }
 
+func WithRequestChecksumCalculation(value aws.RequestChecksumCalculation) func(*Options) {
+	return func(o *Options) {
+		o.RequestChecksumCalculation = value
+	}
+}
+
 func WithMaxSize(maxSize int64) func(*Options) {
 	return func(o *Options) {
 		o.MaxSize = maxSize
@@ -72,7 +79,10 @@ func New(ctx context.Context, optFuncs ...func(*Options)) (*storage.Storage, err
 		return nil, err
 	}
 
-	loadOpts := buildLoadOptions(opts)
+	loadOpts, err := buildLoadOptions(opts)
+	if err != nil {
+		return nil, err
+	}
 
 	cfg, err := config.LoadDefaultConfig(ctx, loadOpts...)
 	if err != nil {
@@ -93,16 +103,21 @@ func New(ctx context.Context, optFuncs ...func(*Options)) (*storage.Storage, err
 	return store, nil
 }
 
-func buildLoadOptions(opts Options) []func(*config.LoadOptions) error {
+func buildLoadOptions(opts Options) ([]func(*config.LoadOptions) error, error) {
 	loadOpts := make([]func(*config.LoadOptions) error, 0, 2)
 	if endpoint := strings.TrimSpace(opts.Endpoint); endpoint != "" {
 		loadOpts = append(loadOpts, config.WithBaseEndpoint(endpoint))
+	}
+
+	if opts.RequestChecksumCalculation != aws.RequestChecksumCalculationUnset {
+		loadOpts = append(loadOpts, config.WithRequestChecksumCalculation(opts.RequestChecksumCalculation))
+	} else if strings.TrimSpace(opts.Endpoint) != "" {
 		// Some S3-compatible providers reject the SDK's opportunistic CRC32
 		// request checksums on streaming uploads.
 		loadOpts = append(loadOpts, config.WithRequestChecksumCalculation(aws.RequestChecksumCalculationWhenRequired))
 	}
 
-	return loadOpts
+	return loadOpts, nil
 }
 
 func resolveTaggedOptions(opts *Options) error {
