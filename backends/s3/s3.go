@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
@@ -71,10 +72,7 @@ func New(ctx context.Context, optFuncs ...func(*Options)) (*storage.Storage, err
 		return nil, err
 	}
 
-	loadOpts := make([]func(*config.LoadOptions) error, 0, 1)
-	if endpoint := strings.TrimSpace(opts.Endpoint); endpoint != "" {
-		loadOpts = append(loadOpts, config.WithBaseEndpoint(endpoint))
-	}
+	loadOpts := buildLoadOptions(opts)
 
 	cfg, err := config.LoadDefaultConfig(ctx, loadOpts...)
 	if err != nil {
@@ -93,6 +91,18 @@ func New(ctx context.Context, optFuncs ...func(*Options)) (*storage.Storage, err
 	}
 
 	return store, nil
+}
+
+func buildLoadOptions(opts Options) []func(*config.LoadOptions) error {
+	loadOpts := make([]func(*config.LoadOptions) error, 0, 2)
+	if endpoint := strings.TrimSpace(opts.Endpoint); endpoint != "" {
+		loadOpts = append(loadOpts, config.WithBaseEndpoint(endpoint))
+		// Some S3-compatible providers reject the SDK's opportunistic CRC32
+		// request checksums on streaming uploads.
+		loadOpts = append(loadOpts, config.WithRequestChecksumCalculation(aws.RequestChecksumCalculationWhenRequired))
+	}
+
+	return loadOpts
 }
 
 func resolveTaggedOptions(opts *Options) error {
