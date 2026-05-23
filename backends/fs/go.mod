@@ -1,6 +1,6 @@
 module github.com/tavocg/go-storage/backends/fs
 
-go 1.26.1
+go 1.26.3
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.7
