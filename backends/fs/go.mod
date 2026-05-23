@@ -5,7 +5,7 @@ go 1.26.1
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.7
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.101.0
-	github.com/tavocg/go-storage v0.0.0-20260523051731-da38ffa15b62
+	github.com/tavocg/go-storage v0.0.0
 )
 
 require (
@@ -20,3 +20,5 @@ require (
 	github.com/aws/smithy-go v1.25.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 )
+
+replace github.com/tavocg/go-storage => ../..

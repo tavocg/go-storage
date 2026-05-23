@@ -5,6 +5,9 @@ go 1.26.1
 require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
+	github.com/tavocg/go-storage v0.0.0
+	github.com/tavocg/go-storage/backends/fs v0.0.0
+	github.com/tavocg/go-storage/backends/s3 v0.0.0
 )
 
 require (
@@ -42,3 +45,9 @@ require (
 	golang.org/x/sys v0.29.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
 )
+
+replace github.com/tavocg/go-storage => ..
+
+replace github.com/tavocg/go-storage/backends/fs => ../backends/fs
+
+replace github.com/tavocg/go-storage/backends/s3 => ../backends/s3
