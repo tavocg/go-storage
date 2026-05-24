@@ -39,6 +39,8 @@ func example(ctx context.Context, s *storage.Storage) error {
 	}
 
 	fmt.Println(string(data))
+	fmt.Println(s.Exists(head.Key))
+	fmt.Println(s.List())
 
 	if err := s.Delete(ctx, head); err != nil {
 		return err

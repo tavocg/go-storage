@@ -59,6 +59,16 @@ func (s *Storage) LoadState(ctx context.Context) error {
 	return nil
 }
 
+// List returns a copy of the tracked object sizes keyed by object name.
+func (s *Storage) List() map[string]int64 {
+	return s.state.list()
+}
+
+// Exists reports whether key is currently tracked in storage.
+func (s *Storage) Exists(key string) bool {
+	return s.state.exists(key)
+}
+
 // PutOption configures metadata for a Put request.
 type PutOption func(*ObjectHead)
 

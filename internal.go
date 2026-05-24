@@ -61,6 +61,26 @@ func (s *mutableState) load(objects map[string]int64, size int64) {
 	s.inflight = 0
 }
 
+func (s *mutableState) list() map[string]int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	objects := make(map[string]int64, len(s.objects))
+	for key, size := range s.objects {
+		objects[key] = size
+	}
+
+	return objects
+}
+
+func (s *mutableState) exists(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, ok := s.objects[key]
+	return ok
+}
+
 func (s *mutableState) startPut(key string, knownSize int64) (*putReservation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
