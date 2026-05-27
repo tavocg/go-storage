@@ -57,7 +57,7 @@ func runGet(ctx context.Context, cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	body, err := store.Get(ctx, &storage.ObjectHead{Key: args[0]})
+	body, err := store.GetBody(ctx, &storage.ObjectHead{Key: args[0]})
 	if err != nil {
 		return err
 	}

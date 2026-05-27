@@ -29,6 +29,7 @@ func initStorageConfig(cmd *cobra.Command) {
 	viper.SetDefault("s3.secret-access-key", "")
 	viper.SetDefault("s3.region", defaultS3Region)
 	viper.SetDefault("s3.endpoint", "")
+	viper.SetDefault("s3.public-endpoint", "")
 	viper.SetDefault("s3.max-size", defaultS3MaxSize)
 
 	flags := cmd.PersistentFlags()
@@ -40,6 +41,7 @@ func initStorageConfig(cmd *cobra.Command) {
 	flags.String("s3-secret-access-key", "", "S3 secret access key")
 	flags.String("s3-region", defaultS3Region, "S3 region")
 	flags.String("s3-endpoint", "", "S3-compatible endpoint URL")
+	flags.String("s3-public-endpoint", "", "public base URL used for direct object downloads")
 	flags.Int64("s3-max-size", defaultS3MaxSize, "maximum total stored bytes")
 
 	mustBindFlag("backend", cmd, "backend")
@@ -50,6 +52,7 @@ func initStorageConfig(cmd *cobra.Command) {
 	mustBindFlag("s3.secret-access-key", cmd, "s3-secret-access-key")
 	mustBindFlag("s3.region", cmd, "s3-region")
 	mustBindFlag("s3.endpoint", cmd, "s3-endpoint")
+	mustBindFlag("s3.public-endpoint", cmd, "s3-public-endpoint")
 	mustBindFlag("s3.max-size", cmd, "s3-max-size")
 }
 
@@ -78,7 +81,7 @@ func newFSStorage(ctx context.Context) (*storage.Storage, error) {
 }
 
 func newS3Storage(ctx context.Context) (*storage.Storage, error) {
-	optFuncs := make([]func(*s3backend.Options), 0, 6)
+	optFuncs := make([]func(*s3backend.Options), 0, 7)
 
 	if value, ok := configuredString("s3.bucket", "s3-bucket", "STORE_S3_BUCKET"); ok {
 		optFuncs = append(optFuncs, s3backend.WithBucket(value))
@@ -94,6 +97,9 @@ func newS3Storage(ctx context.Context) (*storage.Storage, error) {
 	}
 	if value, ok := configuredString("s3.endpoint", "s3-endpoint", "STORE_S3_ENDPOINT"); ok {
 		optFuncs = append(optFuncs, s3backend.WithEndpoint(value))
+	}
+	if value, ok := configuredString("s3.public-endpoint", "s3-public-endpoint", "STORE_S3_PUBLIC_ENDPOINT"); ok {
+		optFuncs = append(optFuncs, s3backend.WithPublicEndpointURL(value))
 	}
 	if value, ok := configuredInt64("s3.max-size", "s3-max-size", "STORE_S3_MAX_SIZE"); ok {
 		optFuncs = append(optFuncs, s3backend.WithMaxSize(value))

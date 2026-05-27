@@ -23,6 +23,7 @@ type Options struct {
 	SecretAccessKey            string `env:"AWS_SECRET_ACCESS_KEY"`
 	Region                     string `env:"AWS_REGION,auto"`
 	Endpoint                   string `env:"AWS_ENDPOINT_URL_S3"`
+	PublicEndpointURL          string `env:"AWS_PUBLIC_ENDPOINT_URL_S3"`
 	RequestChecksumCalculation aws.RequestChecksumCalculation
 	MaxSize                    int64 `env:"STORAGE_MAX_SIZE,10737418240"` // 1GB
 }
@@ -54,6 +55,12 @@ func WithRegion(region string) func(*Options) {
 func WithEndpoint(endpoint string) func(*Options) {
 	return func(o *Options) {
 		o.Endpoint = endpoint
+	}
+}
+
+func WithPublicEndpointURL(publicEndpointURL string) func(*Options) {
+	return func(o *Options) {
+		o.PublicEndpointURL = publicEndpointURL
 	}
 }
 
@@ -95,7 +102,7 @@ func New(ctx context.Context, optFuncs ...func(*Options)) (*storage.Storage, err
 		}
 	})
 
-	store := storage.New(client, opts.Bucket, opts.MaxSize)
+	store := storage.New(client, opts.Bucket, opts.MaxSize, storage.WithPublicEndpointURL(opts.PublicEndpointURL))
 	if err := store.LoadState(ctx); err != nil {
 		return nil, fmt.Errorf("load storage state: %w", err)
 	}

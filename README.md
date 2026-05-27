@@ -70,7 +70,11 @@ func newStore(ctx context.Context) error {
 		s3backend.WithBucket("personal"),
 		s3backend.WithRegion("auto"),
 		s3backend.WithEndpoint("https://11bf4a9e76b5bde4ca62baa852624281.r2.cloudflarestorage.com"),
+		s3backend.WithPublicEndpointURL("https://pub-11bf4a9e76b5bde4ca62baa852624281.r2.dev"),
 	)
 	return err
 }
 ```
+
+When `WithPublicEndpointURL` is set, `GetBody` downloads objects directly from
+that public base URL; otherwise it uses the configured S3 backend.

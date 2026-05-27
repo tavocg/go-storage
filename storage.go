@@ -4,7 +4,11 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -13,18 +17,38 @@ import (
 // Storage stores objects in a single bucket and tracks total and in-flight
 // byte usage against maxSize.
 type Storage struct {
-	backend Backend
-	bucket  string
-	state   *mutableState
+	backend           Backend
+	bucket            string
+	publicEndpointURL string
+	httpClient        *http.Client
+	state             *mutableState
 }
+
+// StorageOption configures Storage.
+type StorageOption func(*Storage)
 
 // New returns a Storage that uses backend to store objects in bucket and
 // enforces maxSize as the total allowed byte usage.
-func New(backend Backend, bucket string, maxSize int64) *Storage {
-	return &Storage{
-		backend: backend,
-		bucket:  bucket,
-		state:   newMutableState(maxSize),
+func New(backend Backend, bucket string, maxSize int64, opts ...StorageOption) *Storage {
+	store := &Storage{
+		backend:    backend,
+		bucket:     bucket,
+		httpClient: http.DefaultClient,
+		state:      newMutableState(maxSize),
+	}
+
+	for _, opt := range opts {
+		opt(store)
+	}
+
+	return store
+}
+
+// WithPublicEndpointURL sets the base URL used by GetBody for public object
+// downloads. When empty, GetBody uses the backend's GetObject method.
+func WithPublicEndpointURL(rawURL string) StorageOption {
+	return func(s *Storage) {
+		s.publicEndpointURL = strings.TrimSpace(rawURL)
 	}
 }
 
@@ -155,10 +179,14 @@ func (s *Storage) Put(ctx context.Context, body io.Reader, opts ...PutOption) (*
 	return &oh, nil
 }
 
-// Get opens an object body for reading.
+// GetBody opens an object body for reading.
 //
 // The caller must close the returned reader.
-func (s *Storage) Get(ctx context.Context, head *ObjectHead) (io.ReadCloser, error) {
+func (s *Storage) GetBody(ctx context.Context, head *ObjectHead) (io.ReadCloser, error) {
+	if s.publicEndpointURL != "" {
+		return s.getPublicBody(ctx, head.Key)
+	}
+
 	obj, err := s.backend.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(head.Key),
@@ -167,6 +195,13 @@ func (s *Storage) Get(ctx context.Context, head *ObjectHead) (io.ReadCloser, err
 		return nil, err
 	}
 	return obj.Body, err
+}
+
+// Get opens an object body for reading.
+//
+// The caller must close the returned reader.
+func (s *Storage) Get(ctx context.Context, head *ObjectHead) (io.ReadCloser, error) {
+	return s.GetBody(ctx, head)
 }
 
 // Delete removes an object from the bucket and subtracts its tracked size from
@@ -185,4 +220,53 @@ func (s *Storage) Delete(ctx context.Context, head *ObjectHead) error {
 	s.state.removeObject(head.Key, head.Size)
 
 	return nil
+}
+
+func (s *Storage) getPublicBody(ctx context.Context, key string) (io.ReadCloser, error) {
+	publicURL, err := publicObjectURL(s.publicEndpointURL, key)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, publicURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		_ = resp.Body.Close()
+		return nil, ErrObjectNotFound
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("public get %q: unexpected status %s", key, resp.Status)
+	}
+
+	return resp.Body, nil
+}
+
+func publicObjectURL(baseURL, key string) (string, error) {
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("parse public endpoint URL: %w", err)
+	}
+
+	escapedKey := escapeObjectKey(key)
+	base.Path = strings.TrimRight(base.Path, "/") + "/" + escapedKey
+
+	return base.String(), nil
+}
+
+func escapeObjectKey(key string) string {
+	parts := strings.Split(key, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+
+	return strings.Join(parts, "/")
 }
