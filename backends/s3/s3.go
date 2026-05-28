@@ -22,8 +22,8 @@ type Options struct {
 	AccessKeyID                string `env:"AWS_ACCESS_KEY_ID"`
 	SecretAccessKey            string `env:"AWS_SECRET_ACCESS_KEY"`
 	Region                     string `env:"AWS_REGION,auto"`
-	Endpoint                   string `env:"AWS_ENDPOINT_URL_S3"`
-	PublicEndpointURL          string `env:"AWS_PUBLIC_ENDPOINT_URL_S3"`
+	Endpoint                   string `env:"AWS_ENDPOINT_URL_S3,"`
+	PublicEndpointURL          string `env:"AWS_PUBLIC_ENDPOINT_URL_S3,"`
 	RequestChecksumCalculation aws.RequestChecksumCalculation
 	MaxSize                    int64 `env:"STORAGE_MAX_SIZE,10737418240"` // 1GB
 }
@@ -102,7 +102,12 @@ func New(ctx context.Context, optFuncs ...func(*Options)) (*storage.Storage, err
 		}
 	})
 
-	store := storage.New(client, opts.Bucket, opts.MaxSize, storage.WithPublicEndpointURL(opts.PublicEndpointURL))
+	storageOpts := make([]storage.StorageOption, 0, 1)
+	if publicEndpointURL := strings.TrimSpace(opts.PublicEndpointURL); publicEndpointURL != "" {
+		storageOpts = append(storageOpts, storage.WithPublicEndpointURL(publicEndpointURL))
+	}
+
+	store := storage.New(client, opts.Bucket, opts.MaxSize, storageOpts...)
 	if err := store.LoadState(ctx); err != nil {
 		return nil, fmt.Errorf("load storage state: %w", err)
 	}
@@ -150,12 +155,12 @@ func resolveTaggedOptions(opts *Options) error {
 			return fmt.Errorf("field %s must be settable", fieldType.Name)
 		}
 
-		envName, defaultValue := parseEnvTag(tag)
+		envName, defaultValue, hasDefault := parseEnvTag(tag)
 		if envName == "" {
 			return fmt.Errorf("field %s has an invalid env tag", fieldType.Name)
 		}
 
-		if err := resolveTaggedField(field, fieldType.Name, envName, defaultValue); err != nil {
+		if err := resolveTaggedField(field, fieldType.Name, envName, defaultValue, hasDefault); err != nil {
 			return err
 		}
 	}
@@ -163,7 +168,7 @@ func resolveTaggedOptions(opts *Options) error {
 	return nil
 }
 
-func resolveTaggedField(field reflect.Value, fieldName, envName, defaultValue string) error {
+func resolveTaggedField(field reflect.Value, fieldName, envName, defaultValue string, hasDefault bool) error {
 	if currentValue, ok := currentFieldValue(field); ok {
 		return setEnvIfNeeded(envName, currentValue)
 	}
@@ -175,24 +180,27 @@ func resolveTaggedField(field reflect.Value, fieldName, envName, defaultValue st
 		return nil
 	}
 
-	if defaultValue != "" {
+	if hasDefault {
 		if err := setFieldValue(field, envName, defaultValue); err != nil {
 			return err
 		}
-		return setEnvIfNeeded(envName, defaultValue)
+		if defaultValue != "" {
+			return setEnvIfNeeded(envName, defaultValue)
+		}
+		return nil
 	}
 
 	return fmt.Errorf("%s is required for %s", envName, fieldName)
 }
 
-func parseEnvTag(tag string) (string, string) {
+func parseEnvTag(tag string) (string, string, bool) {
 	parts := strings.SplitN(tag, ",", 2)
 	envName := strings.TrimSpace(parts[0])
 	if len(parts) == 1 {
-		return envName, ""
+		return envName, "", false
 	}
 
-	return envName, strings.TrimSpace(parts[1])
+	return envName, strings.TrimSpace(parts[1]), true
 }
 
 func currentFieldValue(field reflect.Value) (string, bool) {
