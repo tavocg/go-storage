@@ -78,3 +78,7 @@ func newStore(ctx context.Context) error {
 
 When `WithPublicEndpointURL` is set, `GetBody` downloads objects directly from
 that public base URL; otherwise it uses the configured S3 backend.
+
+## TODO
+
+- [ ] Fix PUT larger objects returning `Error: operation error S3: PutObject, https response error StatusCode: 411, RequestID: , HostID: , api error MissingContentLength: You must provide the Content-Length HTTP header.`
