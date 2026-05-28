@@ -163,6 +163,9 @@ func (s *Storage) Put(ctx context.Context, body io.Reader, opts ...PutOption) (*
 		Key:    aws.String(oh.Key),
 		Body:   hlr,
 	}
+	if contentLength, ok := putContentLength(body, oh.Size); ok {
+		input.ContentLength = aws.Int64(contentLength)
+	}
 	if oh.Type != "" {
 		input.ContentType = aws.String(oh.Type)
 	}
@@ -177,6 +180,43 @@ func (s *Storage) Put(ctx context.Context, body io.Reader, opts ...PutOption) (*
 	oh.SHA256 = hlr.SHA256()
 
 	return &oh, nil
+}
+
+func putContentLength(body io.Reader, limit int64) (int64, bool) {
+	if limit < 0 {
+		return 0, false
+	}
+
+	if sized, ok := body.(interface{ Len() int }); ok {
+		return minInt64(limit, int64(sized.Len())), true
+	}
+
+	seeker, ok := body.(io.Seeker)
+	if !ok {
+		return limit, true
+	}
+
+	current, err := seeker.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return limit, true
+	}
+	end, err := seeker.Seek(0, io.SeekEnd)
+	if err != nil {
+		_, _ = seeker.Seek(current, io.SeekStart)
+		return limit, true
+	}
+	if _, err := seeker.Seek(current, io.SeekStart); err != nil {
+		return limit, true
+	}
+
+	return minInt64(limit, end-current), true
+}
+
+func minInt64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // GetBody opens an object body for reading.
