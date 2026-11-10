@@ -1,35 +1,20 @@
+// Package storage provides object storage with byte quotas and operation limits.
 package storage
 
 import (
 	"context"
-	"errors"
-
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/s3/types"
-	"github.com/aws/smithy-go"
+	"io"
 )
 
-// Backend is the minimal S3 API surface required by Storage.
+// Backend stores objects in one namespace and must be safe for concurrent use.
+// Put atomically replaces an object: readers see the old or complete new body.
+// Delete is idempotent. A mutation error guarantees the object is unchanged,
+// unless it wraps ErrOutcomeUnknown (for example a lost network response).
+// Put must store exactly object.Size bytes or fail, and must not retain body.
+// List excludes temporary uploads and historical versions.
 type Backend interface {
-	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
-	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
-	DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
-	ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
-}
-
-func isNotFound(err error) bool {
-	if errors.Is(err, ErrObjectNotFound) {
-		return true
-	}
-
-	if _, ok := errors.AsType[*types.NoSuchKey](err); ok {
-		return true
-	}
-
-	if _, ok := errors.AsType[*types.NotFound](err); ok {
-		return true
-	}
-
-	apiErr, ok := errors.AsType[smithy.APIError](err)
-	return ok && (apiErr.ErrorCode() == "NoSuchKey" || apiErr.ErrorCode() == "NotFound")
+	Put(ctx context.Context, object Object, body io.ReadSeeker) error
+	Get(ctx context.Context, key string) (Object, io.ReadCloser, error)
+	Delete(ctx context.Context, key string) error
+	List(ctx context.Context) ([]Object, error)
 }

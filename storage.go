@@ -1,312 +1,274 @@
-// Package storage provides a small S3-backed object storage wrapper with
-// basic size accounting.
 package storage
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
+	"math"
+	"os"
 	"strings"
-
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"time"
+	"unicode/utf8"
 )
 
-// Storage stores objects in a single bucket and tracks total and in-flight
-// byte usage against maxSize.
+// Options configure one namespace. Scope must uniquely identify the backend
+// namespace, including endpoint/account when necessary. Equal scopes must not
+// refer to different namespaces. Limits must match across coordinated users.
+type Options struct {
+	Scope       string
+	Limits      Limits
+	Coordinator Coordinator
+	// TempDir holds staged uploads; empty uses the OS temporary directory.
+	TempDir string
+	// FinalizeTimeout bounds cleanup independent of caller cancellation.
+	// Zero selects five seconds.
+	FinalizeTimeout time.Duration
+}
+
+// Storage is safe for concurrent use. Without a Coordinator, New creates a
+// private MemoryCoordinator and scans existing objects before returning.
+// Only calls through this Storage are then covered by its quota guarantees.
 type Storage struct {
-	backend           Backend
-	bucket            string
-	publicEndpointURL string
-	httpClient        *http.Client
-	state             *mutableState
+	backend     Backend
+	options     Options
+	coordinator Coordinator
 }
 
-// StorageOption configures Storage.
-type StorageOption func(*Storage)
-
-// New returns a Storage that uses backend to store objects in bucket and
-// enforces maxSize as the total allowed byte usage.
-func New(backend Backend, bucket string, maxSize int64, opts ...StorageOption) *Storage {
-	store := &Storage{
-		backend:    backend,
-		bucket:     bucket,
-		httpClient: http.DefaultClient,
-		state:      newMutableState(maxSize),
+func New(ctx context.Context, backend Backend, options Options) (*Storage, error) {
+	if backend == nil || strings.TrimSpace(options.Scope) == "" {
+		return nil, fmt.Errorf("storage: backend and scope are required")
 	}
-
-	for _, opt := range opts {
-		opt(store)
+	if err := validateLimits(options.Limits); err != nil {
+		return nil, err
 	}
-
-	return store
-}
-
-// WithPublicEndpointURL sets the base URL used by GetBody for public object
-// downloads. When empty, GetBody uses the backend's GetObject method.
-func WithPublicEndpointURL(rawURL string) StorageOption {
-	return func(s *Storage) {
-		s.publicEndpointURL = strings.TrimSpace(rawURL)
+	if options.FinalizeTimeout < 0 {
+		return nil, fmt.Errorf("storage: invalid finalization timeout")
 	}
-}
-
-// LoadState refreshes Storage's tracked byte usage from the backend bucket.
-//
-// Call LoadState after constructing Storage and before using it so in-memory
-// accounting starts from the bucket's current size.
-func (s *Storage) LoadState(ctx context.Context) error {
-	objects := make(map[string]int64)
-	var size int64
-
-	p := s3.NewListObjectsV2Paginator(s.backend, &s3.ListObjectsV2Input{
-		Bucket: aws.String(s.bucket),
-	})
-
-	for p.HasMorePages() {
-		page, err := p.NextPage(ctx)
-		if err != nil {
-			return err
-		}
-
-		for _, obj := range page.Contents {
-			key := aws.ToString(obj.Key)
-			objectSize := aws.ToInt64(obj.Size)
-			objects[key] = objectSize
-			size += objectSize
-		}
+	if options.FinalizeTimeout == 0 {
+		options.FinalizeTimeout = 5 * time.Second
 	}
-
-	s.state.load(objects, size)
-
-	return nil
-}
-
-// List returns a copy of the tracked object sizes keyed by object name.
-func (s *Storage) List() map[string]int64 {
-	return s.state.list()
-}
-
-// Exists reports whether key is currently tracked in storage.
-func (s *Storage) Exists(key string) bool {
-	return s.state.exists(key)
-}
-
-// PutOption configures metadata for a Put request.
-type PutOption func(*ObjectHead)
-
-// WithKey sets the object key used by Put. If omitted, Put generates a random
-// key.
-func WithKey(key string) PutOption {
-	return func(o *ObjectHead) {
-		o.Key = key
+	c := options.Coordinator
+	if c == nil {
+		c = NewMemoryCoordinator()
 	}
-}
-
-// WithSizeLimit sets the maximum number of bytes Put will read from body.
-//
-// Providing a size limit lets Put reserve capacity up front and use a bounded
-// reader, which is slightly faster than reserving per read. The final stored
-// object may be smaller if body ends before the limit.
-func WithSizeLimit(size int64) PutOption {
-	return func(o *ObjectHead) {
-		o.Size = size
-	}
-}
-
-// WithContentType sets the stored content type metadata for Put.
-func WithContentType(contentType string) PutOption {
-	return func(o *ObjectHead) {
-		o.Type = contentType
-	}
-}
-
-// Put stores body in the configured bucket and returns the resulting object
-// metadata.
-//
-// When WithSizeLimit is provided, Put can reserve storage up front and stream
-// through a bounded reader, which is more efficient than reserving bytes on
-// each read. The returned ObjectHead.Size is the number of bytes actually
-// stored.
-func (s *Storage) Put(ctx context.Context, body io.Reader, opts ...PutOption) (*ObjectHead, error) {
-	oh := ObjectHead{Size: -1}
-	for _, opt := range opts {
-		opt(&oh)
-	}
-
-	if oh.Key == "" {
-		uuid, err := randomUUID()
+	s := &Storage{backend: backend, options: options, coordinator: c}
+	if err := c.Initialize(ctx, options.Scope, options.Limits, func(ctx context.Context) (map[string]int64, error) {
+		objects, err := backend.List(ctx)
 		if err != nil {
 			return nil, err
 		}
-		oh.Key = uuid
-	}
-
-	reservation, err := s.state.startPut(oh.Key, oh.Size)
-	if err != nil {
-		return nil, err
-	}
-
-	var hlr *hashingLimitReader
-	if oh.Size >= 0 {
-		// Size-limited uploads reserve once and use a bounded reader.
-		hlr = newHashingLimitReader(body, oh.Size)
-	} else {
-		// Unknown-size uploads reserve incrementally only after they grow
-		// beyond the size of the object they overwrite.
-		hlr = newHashingLimitReader(body, -1, reservation.consume)
-	}
-
-	input := &s3.PutObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(oh.Key),
-		Body:   hlr,
-	}
-	if contentLength, ok := putContentLength(body, oh.Size); ok {
-		input.ContentLength = aws.Int64(contentLength)
-	}
-	if oh.Type != "" {
-		input.ContentType = aws.String(oh.Type)
-	}
-
-	if _, err := s.backend.PutObject(ctx, input); err != nil {
-		s.state.abortPut(reservation)
-		return nil, err
-	}
-
-	s.state.finishPut(reservation, hlr.Size())
-	oh.Size = hlr.Size()
-	oh.SHA256 = hlr.SHA256()
-
-	return &oh, nil
-}
-
-func putContentLength(body io.Reader, limit int64) (int64, bool) {
-	if limit < 0 {
-		return 0, false
-	}
-
-	if sized, ok := body.(interface{ Len() int }); ok {
-		return minInt64(limit, int64(sized.Len())), true
-	}
-
-	seeker, ok := body.(io.Seeker)
-	if !ok {
-		return limit, true
-	}
-
-	current, err := seeker.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return limit, true
-	}
-	end, err := seeker.Seek(0, io.SeekEnd)
-	if err != nil {
-		_, _ = seeker.Seek(current, io.SeekStart)
-		return limit, true
-	}
-	if _, err := seeker.Seek(current, io.SeekStart); err != nil {
-		return limit, true
-	}
-
-	return minInt64(limit, end-current), true
-}
-
-func minInt64(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// GetBody opens an object body for reading.
-//
-// The caller must close the returned reader.
-func (s *Storage) GetBody(ctx context.Context, head *ObjectHead) (io.ReadCloser, error) {
-	if s.publicEndpointURL != "" {
-		return s.getPublicBody(ctx, head.Key)
-	}
-
-	obj, err := s.backend.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(head.Key),
-	})
-	if err != nil {
-		return nil, err
-	}
-	return obj.Body, err
-}
-
-// Get opens an object body for reading.
-//
-// The caller must close the returned reader.
-func (s *Storage) Get(ctx context.Context, head *ObjectHead) (io.ReadCloser, error) {
-	return s.GetBody(ctx, head)
-}
-
-// Delete removes an object from the bucket and subtracts its tracked size from
-// storage usage.
-func (s *Storage) Delete(ctx context.Context, head *ObjectHead) error {
-	if _, err := s.backend.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(head.Key),
-	}); err != nil {
-		if isNotFound(err) {
-			return ErrObjectNotFound
+		snapshot := make(map[string]int64, len(objects))
+		var total int64
+		for _, o := range objects {
+			if err := ValidateKey(o.Key); err != nil {
+				return nil, err
+			}
+			if o.Size < 0 || o.Size > math.MaxInt64-total {
+				return nil, fmt.Errorf("storage: invalid backend size")
+			}
+			if _, exists := snapshot[o.Key]; exists {
+				return nil, fmt.Errorf("storage: duplicate backend key %q", o.Key)
+			}
+			snapshot[o.Key] = o.Size
+			total += o.Size
 		}
-		return err
+		return snapshot, nil
+	}); err != nil {
+		return nil, errors.Join(ErrCoordination, err)
 	}
+	return s, nil
+}
 
-	s.state.removeObject(head.Key, head.Size)
-
+// ValidateKey checks the portable key envelope used by Storage. Backends may
+// impose further service-specific restrictions. Keys are not filesystem paths.
+func ValidateKey(key string) error {
+	if key == "" || len(key) > 1024 || !utf8.ValidString(key) || strings.ContainsRune(key, 0) {
+		return ErrInvalidKey
+	}
 	return nil
 }
 
-func (s *Storage) getPublicBody(ctx context.Context, key string) (io.ReadCloser, error) {
-	publicURL, err := publicObjectURL(s.publicEndpointURL, key)
+type putOptions struct {
+	contentType string
+	limit       int64
+}
+type PutOption func(*putOptions)
+
+func WithContentType(value string) PutOption { return func(o *putOptions) { o.contentType = value } }
+
+// WithSizeLimit bounds the body size. Oversized bodies fail without changing
+// the stored object; they are never silently truncated. Zero permits empty
+// bodies only. Without this option the total quota bounds staging, if enabled.
+func WithSizeLimit(bytes int64) PutOption { return func(o *putOptions) { o.limit = bytes } }
+
+// Put stages and hashes body in a temporary file before reserving its exact
+// size. This supports unknown-size readers and seekable SDK retries. Staging
+// uses disk, not memory; temporary bytes are not part of the logical quota.
+// Cancellation cannot interrupt a body.Read that itself blocks indefinitely.
+func (s *Storage) Put(ctx context.Context, key string, body io.Reader, opts ...PutOption) (Object, error) {
+	if err := ValidateKey(key); err != nil {
+		return Object{}, err
+	}
+	if body == nil {
+		return Object{}, fmt.Errorf("storage: body is required")
+	}
+	options := putOptions{limit: -1}
+	for _, opt := range opts {
+		if opt == nil {
+			return Object{}, fmt.Errorf("storage: nil put option")
+		}
+		opt(&options)
+	}
+	if options.limit < -1 {
+		return Object{}, fmt.Errorf("storage: invalid upload limit")
+	}
+	if err := s.allow(ctx, OperationPut); err != nil {
+		return Object{}, err
+	}
+	file, object, err := s.stage(ctx, key, body, options)
 	if err != nil {
-		return nil, err
+		return Object{}, err
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, publicURL, nil)
+	defer os.Remove(file.Name())
+	defer file.Close()
+	m := Mutation{Scope: s.options.Scope, ID: rand.Text(), Key: key, Operation: OperationPut, Size: object.Size}
+	r, err := s.coordinator.Reserve(ctx, m)
 	if err != nil {
-		return nil, err
+		return Object{}, errors.Join(ErrCoordination, err)
 	}
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, err
+	if r == nil {
+		return Object{}, fmt.Errorf("%w: nil reservation", ErrCoordination)
 	}
-
-	if resp.StatusCode == http.StatusNotFound {
-		_ = resp.Body.Close()
-		return nil, ErrObjectNotFound
+	err = s.backend.Put(ctx, object, file)
+	if err := s.finish(ctx, m, r, err); err != nil {
+		return Object{}, err
 	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		_ = resp.Body.Close()
-		return nil, fmt.Errorf("public get %q: unexpected status %s", key, resp.Status)
-	}
-
-	return resp.Body, nil
+	return object, nil
 }
 
-func publicObjectURL(baseURL, key string) (string, error) {
-	base, err := url.Parse(baseURL)
-	if err != nil {
-		return "", fmt.Errorf("parse public endpoint URL: %w", err)
+// Get opens the current backend object. The caller must close the body.
+func (s *Storage) Get(ctx context.Context, key string) (Object, io.ReadCloser, error) {
+	if err := ValidateKey(key); err != nil {
+		return Object{}, nil, err
 	}
-
-	escapedKey := escapeObjectKey(key)
-	base.Path = strings.TrimRight(base.Path, "/") + "/" + escapedKey
-
-	return base.String(), nil
+	if err := s.allow(ctx, OperationGet); err != nil {
+		return Object{}, nil, err
+	}
+	return s.backend.Get(ctx, key)
 }
 
-func escapeObjectKey(key string) string {
-	parts := strings.Split(key, "/")
-	for i, part := range parts {
-		parts[i] = url.PathEscape(part)
+// List returns the backend's current objects, not a cached coordinator view.
+// One call counts as one operation even if the backend uses multiple pages.
+func (s *Storage) List(ctx context.Context) ([]Object, error) {
+	if err := s.allow(ctx, OperationList); err != nil {
+		return nil, err
 	}
+	return s.backend.List(ctx)
+}
 
-	return strings.Join(parts, "/")
+// Delete is idempotent, including for accounting. The backend is still called
+// for missing keys, and each admitted call counts toward the operation limit.
+func (s *Storage) Delete(ctx context.Context, key string) error {
+	if err := ValidateKey(key); err != nil {
+		return err
+	}
+	if err := s.allow(ctx, OperationDelete); err != nil {
+		return err
+	}
+	m := Mutation{Scope: s.options.Scope, ID: rand.Text(), Key: key, Operation: OperationDelete}
+	r, err := s.coordinator.Reserve(ctx, m)
+	if err != nil {
+		return errors.Join(ErrCoordination, err)
+	}
+	if r == nil {
+		return fmt.Errorf("%w: nil reservation", ErrCoordination)
+	}
+	return s.finish(ctx, m, r, s.backend.Delete(ctx, key))
+}
+
+func (s *Storage) allow(ctx context.Context, op Operation) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.coordinator.Allow(ctx, s.options.Scope, op); err != nil {
+		return errors.Join(ErrCoordination, err)
+	}
+	return nil
+}
+
+func (s *Storage) finish(ctx context.Context, m Mutation, r Reservation, backendErr error) error {
+	if errors.Is(backendErr, ErrOutcomeUnknown) {
+		return &PendingError{Scope: m.Scope, Key: m.Key, ID: m.ID, Reservation: r, Cause: backendErr}
+	}
+	outcome := Applied
+	if backendErr != nil {
+		outcome = Unchanged
+	}
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.options.FinalizeTimeout)
+	defer cancel()
+	if err := r.Complete(cleanup, outcome); err != nil {
+		return &PendingError{Scope: m.Scope, Key: m.Key, ID: m.ID, Reservation: r, Suggested: outcome, Cause: errors.Join(ErrCoordination, backendErr, err)}
+	}
+	return backendErr
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
+}
+
+func (s *Storage) stage(ctx context.Context, key string, body io.Reader, opts putOptions) (*os.File, Object, error) {
+	f, err := os.CreateTemp(s.options.TempDir, "go-storage-*")
+	if err != nil {
+		return nil, Object{}, err
+	}
+	success := false
+	defer func() {
+		if !success {
+			f.Close()
+			os.Remove(f.Name())
+		}
+	}()
+	limit := int64(math.MaxInt64)
+	limitErr := ErrObjectTooLarge
+	if opts.limit >= 0 {
+		limit = opts.limit
+	}
+	if maxBytes := s.options.Limits.MaxBytes; maxBytes > 0 && maxBytes < limit {
+		limit = maxBytes
+		limitErr = ErrQuotaExceeded
+	}
+	source := contextReader{ctx, body}
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(source, limit))
+	if err != nil {
+		return nil, Object{}, err
+	}
+	if n == limit {
+		var extra [1]byte
+		if count, probeErr := io.ReadFull(source, extra[:]); count > 0 {
+			return nil, Object{}, limitErr
+		} else if probeErr != io.EOF {
+			return nil, Object{}, probeErr
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, Object{}, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, Object{}, err
+	}
+	success = true
+	return f, Object{Key: key, Size: n, ContentType: opts.contentType, SHA256: hex.EncodeToString(h.Sum(nil))}, nil
 }
