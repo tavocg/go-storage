@@ -1,248 +1,126 @@
-// Package s3 implements the S3 storage.Backend
+// Package s3 implements storage.Backend for AWS S3 and compatible services.
 package s3
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os"
-	"reflect"
-	"strconv"
+	"io"
+	"sort"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-
-	"github.com/tavocg/go-storage"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go"
+	storage "github.com/tavocg/go-storage/v2"
 )
 
-type Options struct {
-	//                           KEY,default
-	Bucket                     string `env:"AWS_BUCKET"`
-	AccessKeyID                string `env:"AWS_ACCESS_KEY_ID"`
-	SecretAccessKey            string `env:"AWS_SECRET_ACCESS_KEY"`
-	Region                     string `env:"AWS_REGION,auto"`
-	Endpoint                   string `env:"AWS_ENDPOINT_URL_S3,"`
-	PublicEndpointURL          string `env:"AWS_PUBLIC_ENDPOINT_URL_S3,"`
-	RequestChecksumCalculation aws.RequestChecksumCalculation
-	MaxSize                    int64 `env:"STORAGE_MAX_SIZE,10737418240"` // 1GB
+// Client is the AWS SDK surface used by Backend. The application configures
+// credentials, endpoint, region, path-style addressing, retry and HTTP policies.
+type Client interface {
+	PutObject(context.Context, *awss3.PutObjectInput, ...func(*awss3.Options)) (*awss3.PutObjectOutput, error)
+	GetObject(context.Context, *awss3.GetObjectInput, ...func(*awss3.Options)) (*awss3.GetObjectOutput, error)
+	DeleteObject(context.Context, *awss3.DeleteObjectInput, ...func(*awss3.Options)) (*awss3.DeleteObjectOutput, error)
+	ListObjectsV2(context.Context, *awss3.ListObjectsV2Input, ...func(*awss3.Options)) (*awss3.ListObjectsV2Output, error)
 }
 
-func WithBucket(bucket string) func(*Options) {
-	return func(o *Options) {
-		o.Bucket = bucket
-	}
+type Backend struct {
+	client Client
+	bucket string
 }
 
-func WithAccessKey(accessKeyID string) func(*Options) {
-	return func(o *Options) {
-		o.AccessKeyID = accessKeyID
+func New(client Client, bucket string) (*Backend, error) {
+	if client == nil || strings.TrimSpace(bucket) == "" {
+		return nil, fmt.Errorf("s3: client and bucket are required")
 	}
+	return &Backend{client: client, bucket: bucket}, nil
 }
 
-func WithSecretKey(secretKey string) func(*Options) {
-	return func(o *Options) {
-		o.SecretAccessKey = secretKey
+func (b *Backend) Put(ctx context.Context, object storage.Object, body io.ReadSeeker) error {
+	if err := storage.ValidateKey(object.Key); err != nil {
+		return err
 	}
-}
-
-func WithRegion(region string) func(*Options) {
-	return func(o *Options) {
-		o.Region = region
+	if object.Size < 0 || body == nil {
+		return fmt.Errorf("s3: invalid body or size")
 	}
-}
-
-func WithEndpoint(endpoint string) func(*Options) {
-	return func(o *Options) {
-		o.Endpoint = endpoint
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-}
-
-func WithPublicEndpointURL(publicEndpointURL string) func(*Options) {
-	return func(o *Options) {
-		o.PublicEndpointURL = publicEndpointURL
-	}
-}
-
-func WithRequestChecksumCalculation(value aws.RequestChecksumCalculation) func(*Options) {
-	return func(o *Options) {
-		o.RequestChecksumCalculation = value
-	}
-}
-
-func WithMaxSize(maxSize int64) func(*Options) {
-	return func(o *Options) {
-		o.MaxSize = maxSize
-	}
-}
-
-func New(ctx context.Context, optFuncs ...func(*Options)) (*storage.Storage, error) {
-	opts := Options{}
-	for _, optFunc := range optFuncs {
-		optFunc(&opts)
-	}
-
-	if err := resolveTaggedOptions(&opts); err != nil {
-		return nil, err
-	}
-
-	loadOpts, err := buildLoadOptions(opts)
+	start, err := body.Seek(0, io.SeekCurrent)
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	cfg, err := config.LoadDefaultConfig(ctx, loadOpts...)
+	end, seekErr := body.Seek(0, io.SeekEnd)
+	_, restoreErr := body.Seek(start, io.SeekStart)
+	if err := errors.Join(seekErr, restoreErr); err != nil {
+		return err
+	}
+	if end-start != object.Size {
+		return fmt.Errorf("s3: body size differs from declared size")
+	}
+	input := &awss3.PutObjectInput{
+		Bucket: aws.String(b.bucket), Key: aws.String(object.Key), Body: body,
+		ContentLength: aws.Int64(object.Size),
+		Metadata:      map[string]string{"go-storage-sha256": object.SHA256},
+	}
+	if object.ContentType != "" {
+		input.ContentType = aws.String(object.ContentType)
+	}
+	_, err = b.client.PutObject(ctx, input)
+	// SDK retries can obscure a previous successful attempt with a lost response.
+	// Conservatively retain reservations on every error after invoking the SDK.
 	if err != nil {
-		return nil, fmt.Errorf("load AWS config: %w", err)
+		return errors.Join(storage.ErrOutcomeUnknown, err)
 	}
-
-	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
-		if strings.TrimSpace(opts.Endpoint) != "" {
-			o.UsePathStyle = true
-		}
-	})
-
-	storageOpts := make([]storage.StorageOption, 0, 1)
-	if publicEndpointURL := strings.TrimSpace(opts.PublicEndpointURL); publicEndpointURL != "" {
-		storageOpts = append(storageOpts, storage.WithPublicEndpointURL(publicEndpointURL))
-	}
-
-	store := storage.New(client, opts.Bucket, opts.MaxSize, storageOpts...)
-	if err := store.LoadState(ctx); err != nil {
-		return nil, fmt.Errorf("load storage state: %w", err)
-	}
-
-	return store, nil
-}
-
-func buildLoadOptions(opts Options) ([]func(*config.LoadOptions) error, error) {
-	loadOpts := make([]func(*config.LoadOptions) error, 0, 2)
-	if endpoint := strings.TrimSpace(opts.Endpoint); endpoint != "" {
-		loadOpts = append(loadOpts, config.WithBaseEndpoint(endpoint))
-	}
-
-	if opts.RequestChecksumCalculation != aws.RequestChecksumCalculationUnset {
-		loadOpts = append(loadOpts, config.WithRequestChecksumCalculation(opts.RequestChecksumCalculation))
-	} else if strings.TrimSpace(opts.Endpoint) != "" {
-		// Some S3-compatible providers reject the SDK's opportunistic CRC32
-		// request checksums on streaming uploads.
-		loadOpts = append(loadOpts, config.WithRequestChecksumCalculation(aws.RequestChecksumCalculationWhenRequired))
-	}
-
-	return loadOpts, nil
-}
-
-func resolveTaggedOptions(opts *Options) error {
-	value := reflect.ValueOf(opts)
-	if value.Kind() != reflect.Pointer || value.IsNil() {
-		return fmt.Errorf("options must be a non-nil pointer")
-	}
-
-	elem := value.Elem()
-	if elem.Kind() != reflect.Struct {
-		return fmt.Errorf("options must point to a struct")
-	}
-
-	elemType := elem.Type()
-	for i := range elem.NumField() {
-		field := elem.Field(i)
-		fieldType := elemType.Field(i)
-		tag := fieldType.Tag.Get("env")
-		if tag == "" {
-			continue
-		}
-		if !field.CanSet() {
-			return fmt.Errorf("field %s must be settable", fieldType.Name)
-		}
-
-		envName, defaultValue, hasDefault := parseEnvTag(tag)
-		if envName == "" {
-			return fmt.Errorf("field %s has an invalid env tag", fieldType.Name)
-		}
-
-		if err := resolveTaggedField(field, fieldType.Name, envName, defaultValue, hasDefault); err != nil {
-			return err
-		}
-	}
-
 	return nil
 }
 
-func resolveTaggedField(field reflect.Value, fieldName, envName, defaultValue string, hasDefault bool) error {
-	if currentValue, ok := currentFieldValue(field); ok {
-		return setEnvIfNeeded(envName, currentValue)
+func (b *Backend) Get(ctx context.Context, key string) (storage.Object, io.ReadCloser, error) {
+	if err := storage.ValidateKey(key); err != nil {
+		return storage.Object{}, nil, err
 	}
-
-	if envValue, ok := os.LookupEnv(envName); ok && envValue != "" {
-		if err := setFieldValue(field, envName, envValue); err != nil {
-			return err
-		}
-		return nil
+	if err := ctx.Err(); err != nil {
+		return storage.Object{}, nil, err
 	}
-
-	if hasDefault {
-		if err := setFieldValue(field, envName, defaultValue); err != nil {
-			return err
+	output, err := b.client.GetObject(ctx, &awss3.GetObjectInput{Bucket: aws.String(b.bucket), Key: aws.String(key)})
+	if err != nil {
+		var api smithy.APIError
+		if errors.As(err, &api) && (api.ErrorCode() == "NoSuchKey" || api.ErrorCode() == "NotFound") {
+			return storage.Object{}, nil, storage.ErrNotFound
 		}
-		if defaultValue != "" {
-			return setEnvIfNeeded(envName, defaultValue)
-		}
-		return nil
+		return storage.Object{}, nil, err
 	}
-
-	return fmt.Errorf("%s is required for %s", envName, fieldName)
+	return storage.Object{Key: key, Size: aws.ToInt64(output.ContentLength), ContentType: aws.ToString(output.ContentType), SHA256: output.Metadata["go-storage-sha256"]}, output.Body, nil
 }
 
-func parseEnvTag(tag string) (string, string, bool) {
-	parts := strings.SplitN(tag, ",", 2)
-	envName := strings.TrimSpace(parts[0])
-	if len(parts) == 1 {
-		return envName, "", false
+func (b *Backend) Delete(ctx context.Context, key string) error {
+	if err := storage.ValidateKey(key); err != nil {
+		return err
 	}
-
-	return envName, strings.TrimSpace(parts[1]), true
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_, err := b.client.DeleteObject(ctx, &awss3.DeleteObjectInput{Bucket: aws.String(b.bucket), Key: aws.String(key)})
+	if err != nil {
+		return errors.Join(storage.ErrOutcomeUnknown, err)
+	}
+	return nil
 }
 
-func currentFieldValue(field reflect.Value) (string, bool) {
-	switch field.Kind() {
-	case reflect.String:
-		value := field.String()
-		return value, value != ""
-	case reflect.Int64:
-		value := field.Int()
-		if value == 0 {
-			return "", false
-		}
-		return strconv.FormatInt(value, 10), true
-	default:
-		return "", false
-	}
-}
-
-func setFieldValue(field reflect.Value, envName, raw string) error {
-	switch field.Kind() {
-	case reflect.String:
-		field.SetString(raw)
-		return nil
-	case reflect.Int64:
-		value, err := strconv.ParseInt(raw, 10, 64)
+func (b *Backend) List(ctx context.Context) ([]storage.Object, error) {
+	paginator := awss3.NewListObjectsV2Paginator(b.client, &awss3.ListObjectsV2Input{Bucket: aws.String(b.bucket)})
+	objects := make([]storage.Object, 0)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
 		if err != nil {
-			return fmt.Errorf("invalid %s: %w", envName, err)
+			return nil, err
 		}
-		field.SetInt(value)
-		return nil
-	default:
-		return fmt.Errorf("unsupported field kind %s", field.Kind())
-	}
-}
-
-func setEnvIfNeeded(name, value string) error {
-	current, ok := os.LookupEnv(name)
-	if !ok || current != value {
-		if err := os.Setenv(name, value); err != nil {
-			return fmt.Errorf("set %s: %w", name, err)
+		for _, o := range page.Contents {
+			objects = append(objects, storage.Object{Key: aws.ToString(o.Key), Size: aws.ToInt64(o.Size)})
 		}
 	}
-
-	return nil
+	sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
+	return objects, nil
 }
+
+var _ storage.Backend = (*Backend)(nil)

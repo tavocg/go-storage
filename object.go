@@ -1,13 +1,10 @@
 package storage
 
-// ObjectHead describes an object stored by Storage.
-type ObjectHead struct {
-	// Key is the object identifier inside the bucket.
-	Key string
-	// Type is the object's content type.
-	Type string
-	// Size is the number of bytes stored for the object.
-	Size int64
-	// SHA256 is the hex-encoded SHA-256 digest of the stored body.
-	SHA256 string
+// Object describes a logical object. Size excludes backend metadata and
+// historical versions. SHA256 is a hexadecimal digest when known.
+type Object struct {
+	Key         string
+	Size        int64
+	ContentType string
+	SHA256      string
 }

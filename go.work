@@ -1,8 +1,0 @@
-go 1.26.3
-
-use (
-	.
-	./backends/fs
-	./backends/s3
-	./cmd
-)

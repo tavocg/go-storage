@@ -1,396 +1,235 @@
-// Package fs implements a filesystem-backed storage.Backend.
+// Package fs implements an atomic filesystem backend. Objects are stored in
+// a private file format, with metadata and body in the same renamed file.
 package fs
 
 import (
+	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
-	"path"
-	"path/filepath"
 	"sort"
 	"strings"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/s3/types"
-
-	storage "github.com/tavocg/go-storage"
+	storage "github.com/tavocg/go-storage/v2"
 )
 
-const defaultMaxSize = int64(10 * 1024 * 1024 * 1024)
+// Backend owns an open filesystem root. Call Close after all users stop.
+// The directory must be dedicated to this backend, not a legacy fs backend.
+// os.Root confines filesystem operations to the selected directory.
+type Backend struct{ root *os.Root }
 
-type Options struct {
-	Root    string
-	MaxSize int64
-}
-
-type backend struct {
-	root string
-}
-
-func WithRoot(root string) func(*Options) {
-	return func(o *Options) {
-		o.Root = root
+func New(directory string) (*Backend, error) {
+	if strings.TrimSpace(directory) == "" {
+		return nil, fmt.Errorf("fs: directory is required")
 	}
-}
-
-func WithMaxSize(maxSize int64) func(*Options) {
-	return func(o *Options) {
-		o.MaxSize = maxSize
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		return nil, err
 	}
-}
-
-func New(ctx context.Context, optFuncs ...func(*Options)) (*storage.Storage, error) {
-	opts := Options{
-		MaxSize: defaultMaxSize,
-	}
-	for _, optFunc := range optFuncs {
-		optFunc(&opts)
-	}
-
-	root := strings.TrimSpace(opts.Root)
-	if root == "" {
-		return nil, fmt.Errorf("fs root is required")
-	}
-
-	absRoot, err := filepath.Abs(root)
-	if err != nil {
-		return nil, fmt.Errorf("resolve root: %w", err)
-	}
-
-	if err := os.MkdirAll(absRoot, 0o755); err != nil {
-		return nil, fmt.Errorf("create root: %w", err)
-	}
-	if err := ensureDir(absRoot); err != nil {
-		return nil, fmt.Errorf("validate root: %w", err)
-	}
-
-	store := storage.New(&backend{root: absRoot}, "", opts.MaxSize)
-	if err := store.LoadState(ctx); err != nil {
-		return nil, fmt.Errorf("load storage state: %w", err)
-	}
-
-	return store, nil
-}
-
-func (b *backend) PutObject(ctx context.Context, params *s3.PutObjectInput, _ ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
-	targetPath, err := b.objectPath(aws.ToString(params.Key), true)
+	root, err := os.OpenRoot(directory)
 	if err != nil {
 		return nil, err
 	}
+	return &Backend{root: root}, nil
+}
+func (b *Backend) Close() error { return b.root.Close() }
 
-	tmpFile, err := os.CreateTemp(filepath.Dir(targetPath), ".store-*")
-	if err != nil {
-		return nil, fmt.Errorf("create temp file: %w", err)
-	}
-
-	tmpPath := tmpFile.Name()
-	defer func() {
-		_ = tmpFile.Close()
-	}()
-
-	if _, err := io.Copy(tmpFile, params.Body); err != nil {
-		_ = os.Remove(tmpPath)
-		return nil, fmt.Errorf("write object: %w", err)
-	}
-
-	if err := tmpFile.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return nil, fmt.Errorf("close temp file: %w", err)
-	}
-
-	select {
-	case <-ctx.Done():
-		_ = os.Remove(tmpPath)
-		return nil, ctx.Err()
-	default:
-	}
-
-	if err := os.Rename(tmpPath, targetPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return nil, fmt.Errorf("move object into place: %w", err)
-	}
-
-	return &s3.PutObjectOutput{}, nil
+func filename(key string) string {
+	digest := sha256.Sum256([]byte(key))
+	return "obj-" + hex.EncodeToString(digest[:])
 }
 
-func (b *backend) GetObject(ctx context.Context, params *s3.GetObjectInput, _ ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
-	targetPath, err := b.objectPath(aws.ToString(params.Key), false)
-	if err != nil {
-		return nil, err
-	}
-
-	file, err := os.Open(targetPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, storage.ErrObjectNotFound
-		}
-		return nil, fmt.Errorf("open object: %w", err)
-	}
-
-	info, err := file.Stat()
-	if err != nil {
-		_ = file.Close()
-		return nil, fmt.Errorf("stat object: %w", err)
-	}
-
-	select {
-	case <-ctx.Done():
-		_ = file.Close()
-		return nil, ctx.Err()
-	default:
-	}
-
-	return &s3.GetObjectOutput{
-		Body:          file,
-		ContentLength: aws.Int64(info.Size()),
-	}, nil
+type contextReader struct {
+	ctx  context.Context
+	body io.Reader
 }
 
-func (b *backend) DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, _ ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
-	targetPath, err := b.objectPath(aws.ToString(params.Key), false)
-	if err != nil {
-		return nil, err
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
 	}
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
-
-	if err := os.Remove(targetPath); err != nil {
-		if os.IsNotExist(err) {
-			return nil, storage.ErrObjectNotFound
-		}
-		return nil, fmt.Errorf("delete object: %w", err)
-	}
-
-	b.removeEmptyParents(filepath.Dir(targetPath))
-
-	return &s3.DeleteObjectOutput{}, nil
+	return r.body.Read(p)
 }
 
-func (b *backend) ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, _ ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
-	objects, err := b.listObjects(ctx, aws.ToString(params.Prefix))
+func (b *Backend) Put(ctx context.Context, object storage.Object, body io.ReadSeeker) error {
+	if err := storage.ValidateKey(object.Key); err != nil {
+		return err
+	}
+	if object.Size < 0 || body == nil {
+		return fmt.Errorf("fs: invalid body or size")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	header, err := json.Marshal(object)
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	start := 0
-	if token := aws.ToString(params.ContinuationToken); token != "" {
-		for i, obj := range objects {
-			if aws.ToString(obj.Key) == token {
-				start = i + 1
-				break
-			}
-		}
+	if len(header)+1 > 16*1024 {
+		return fmt.Errorf("fs: metadata exceeds 16 KiB")
 	}
-	if start == 0 {
-		if after := aws.ToString(params.StartAfter); after != "" {
-			for i, obj := range objects {
-				if aws.ToString(obj.Key) > after {
-					start = i
-					break
-				}
-			}
-			if len(objects) > 0 && aws.ToString(objects[len(objects)-1].Key) <= after {
-				start = len(objects)
-			}
-		}
+	name := ".tmp-" + rand.Text()
+	f, err := b.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
 	}
-
-	end := len(objects)
-	if params.MaxKeys != nil && *params.MaxKeys > 0 {
-		maxKeys := int(*params.MaxKeys)
-		if start+maxKeys < end {
-			end = start + maxKeys
-		}
+	defer f.Close()
+	defer b.root.Remove(name)
+	if _, err = f.Write(append(header, '\n')); err != nil {
+		return err
 	}
-
-	page := objects[start:end]
-	out := &s3.ListObjectsV2Output{
-		Contents: page,
+	n, err := io.Copy(f, contextReader{ctx, body})
+	if err != nil {
+		return err
 	}
-	if end < len(objects) {
-		out.IsTruncated = aws.Bool(true)
-		out.NextContinuationToken = page[len(page)-1].Key
-	} else {
-		out.IsTruncated = aws.Bool(false)
+	if n != object.Size {
+		return fmt.Errorf("fs: body size %d differs from declared %d", n, object.Size)
 	}
-
-	return out, nil
+	if err = f.Sync(); err != nil {
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	if err = b.root.Rename(name, filename(object.Key)); err != nil {
+		return err
+	}
+	return b.syncDirectory()
 }
 
-func (b *backend) listObjects(ctx context.Context, prefix string) ([]types.Object, error) {
-	objects := make([]types.Object, 0)
+// Directory sync failure occurs after publication and must retain the quota.
+func (b *Backend) syncDirectory() error {
+	dir, err := b.root.Open(".")
+	if err != nil {
+		return errors.Join(storage.ErrOutcomeUnknown, err)
+	}
+	defer dir.Close()
+	if err = dir.Sync(); err != nil {
+		return errors.Join(storage.ErrOutcomeUnknown, err)
+	}
+	return nil
+}
 
-	err := filepath.WalkDir(b.root, func(currentPath string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
+type objectBody struct {
+	io.Reader
+	file *os.File
+}
 
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
+func (b *objectBody) Close() error { return b.file.Close() }
 
-		if entry.IsDir() {
+func (b *Backend) open(ctx context.Context, name string) (storage.Object, io.ReadCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return storage.Object{}, nil, err
+	}
+	info, err := b.root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return storage.Object{}, nil, storage.ErrNotFound
+	}
+	if err != nil {
+		return storage.Object{}, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return storage.Object{}, nil, fmt.Errorf("fs: non-regular object %q", name)
+	}
+	f, err := b.root.Open(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return storage.Object{}, nil, storage.ErrNotFound
+	}
+	if err != nil {
+		return storage.Object{}, nil, err
+	}
+	fail := func(err error) (storage.Object, io.ReadCloser, error) { f.Close(); return storage.Object{}, nil, err }
+	// Bound corrupt metadata rather than allocating until an arbitrary newline.
+	reader := bufio.NewReaderSize(f, 16*1024)
+	header, err := reader.ReadSlice('\n')
+	if err != nil {
+		return fail(fmt.Errorf("fs: invalid metadata: %w", err))
+	}
+	var object storage.Object
+	if err = json.Unmarshal(header, &object); err != nil {
+		return fail(err)
+	}
+	info, err = f.Stat()
+	if err != nil {
+		return fail(err)
+	}
+	if err = storage.ValidateKey(object.Key); err != nil {
+		return fail(err)
+	}
+	if filename(object.Key) != name || object.Size < 0 || object.Size != info.Size()-int64(len(header)) {
+		return fail(fmt.Errorf("fs: inconsistent object %q", name))
+	}
+	return object, &objectBody{Reader: contextReader{ctx, io.LimitReader(reader, object.Size)}, file: f}, nil
+}
+
+func (b *Backend) Get(ctx context.Context, key string) (storage.Object, io.ReadCloser, error) {
+	if err := storage.ValidateKey(key); err != nil {
+		return storage.Object{}, nil, err
+	}
+	object, body, err := b.open(ctx, filename(key))
+	if err == nil && object.Key != key {
+		body.Close()
+		return storage.Object{}, nil, fmt.Errorf("fs: key collision")
+	}
+	return object, body, err
+}
+
+func (b *Backend) Delete(ctx context.Context, key string) error {
+	if err := storage.ValidateKey(key); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := b.root.Remove(filename(key)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			return fmt.Errorf("symlink entry %q is not allowed", currentPath)
-		}
-
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-
-		relPath, err := filepath.Rel(b.root, currentPath)
-		if err != nil {
-			return err
-		}
-
-		key := filepath.ToSlash(relPath)
-		if prefix != "" && !strings.HasPrefix(key, prefix) {
-			return nil
-		}
-
-		objects = append(objects, types.Object{
-			Key:  aws.String(key),
-			Size: aws.Int64(info.Size()),
-		})
-
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("list objects: %w", err)
+		return err
 	}
+	return b.syncDirectory()
+}
 
-	sort.Slice(objects, func(i, j int) bool {
-		return aws.ToString(objects[i].Key) < aws.ToString(objects[j].Key)
-	})
-
+func (b *Backend) List(ctx context.Context) ([]storage.Object, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	dir, err := b.root.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(-1)
+	if err != nil {
+		return nil, err
+	}
+	objects := make([]storage.Object, 0)
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "obj-") {
+			continue
+		}
+		object, body, err := b.open(ctx, entry.Name())
+		if errors.Is(err, storage.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err = body.Close(); err != nil {
+			return nil, err
+		}
+		objects = append(objects, object)
+	}
+	sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
 	return objects, nil
 }
 
-func (b *backend) objectPath(key string, createParents bool) (string, error) {
-	cleanKey, err := normalizeKey(key)
-	if err != nil {
-		return "", err
-	}
-
-	dir := filepath.Dir(filepath.FromSlash(cleanKey))
-	if dir == "." {
-		dir = ""
-	}
-	if err := b.ensureDirChain(dir, createParents); err != nil {
-		return "", err
-	}
-
-	targetPath := filepath.Join(b.root, filepath.FromSlash(cleanKey))
-	if err := ensureNoSymlink(targetPath); err != nil && !os.IsNotExist(err) {
-		return "", err
-	}
-
-	return targetPath, nil
-}
-
-func normalizeKey(key string) (string, error) {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return "", fmt.Errorf("object key is required")
-	}
-
-	cleanKey := strings.TrimPrefix(path.Clean("/"+key), "/")
-	if cleanKey == "" || cleanKey == "." {
-		return "", fmt.Errorf("object key is required")
-	}
-
-	return cleanKey, nil
-}
-
-func (b *backend) removeEmptyParents(dir string) {
-	for dir != b.root && dir != "." && dir != string(filepath.Separator) {
-		if err := os.Remove(dir); err != nil {
-			return
-		}
-		dir = filepath.Dir(dir)
-	}
-}
-
-func (b *backend) ensureDirChain(dir string, create bool) error {
-	current := b.root
-	if err := ensureDir(current); err != nil {
-		return err
-	}
-	if dir == "" {
-		return nil
-	}
-
-	for _, part := range strings.Split(dir, string(filepath.Separator)) {
-		if part == "" || part == "." {
-			continue
-		}
-
-		current = filepath.Join(current, part)
-		info, err := os.Lstat(current)
-		if err != nil {
-			if !os.IsNotExist(err) {
-				return fmt.Errorf("inspect path %q: %w", current, err)
-			}
-			if !create {
-				return err
-			}
-
-			if err := os.Mkdir(current, 0o755); err != nil && !os.IsExist(err) {
-				return fmt.Errorf("create directory %q: %w", current, err)
-			}
-
-			info, err = os.Lstat(current)
-			if err != nil {
-				return fmt.Errorf("inspect created path %q: %w", current, err)
-			}
-		}
-
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("symlink path component %q is not allowed", current)
-		}
-		if !info.IsDir() {
-			return fmt.Errorf("path component %q is not a directory", current)
-		}
-	}
-
-	return nil
-}
-
-func ensureDir(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("symlink path component %q is not allowed", path)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("path component %q is not a directory", path)
-	}
-
-	return nil
-}
-
-func ensureNoSymlink(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("symlink path component %q is not allowed", path)
-	}
-
-	return nil
-}
+var _ storage.Backend = (*Backend)(nil)
