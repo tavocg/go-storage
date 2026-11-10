@@ -16,15 +16,43 @@ import (
 	"sort"
 	"strings"
 
-	storage "github.com/tavocg/go-storage/v2"
+	storage "github.com/tavocg/go-storage/v3"
+	"github.com/tavocg/go-storage/v3/ratelimit"
 )
 
 // Backend owns an open filesystem root. Call Close after all users stop.
 // The directory must be dedicated to this backend, not a legacy fs backend.
 // os.Root confines filesystem operations to the selected directory.
-type Backend struct{ root *os.Root }
+type Backend struct {
+	root    *os.Root
+	limiter *ratelimit.Limiter
+}
 
-func New(directory string) (*Backend, error) {
+// Operations counts each public backend Put, Get, Delete or List once.
+const Operations ratelimit.Category = "fs:operation"
+
+type options struct{ rates ratelimit.Options }
+type Option func(*options)
+
+func WithRateLimits(rates ratelimit.Options) Option { return func(o *options) { o.rates = rates } }
+
+func New(directory string, opts ...Option) (*Backend, error) {
+	var config options
+	for _, opt := range opts {
+		if opt == nil {
+			return nil, fmt.Errorf("fs: nil option")
+		}
+		opt(&config)
+	}
+	for category := range config.rates.Limits {
+		if category != Operations {
+			return nil, fmt.Errorf("fs: unknown category %q", category)
+		}
+	}
+	limiter, err := ratelimit.New(config.rates)
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(directory) == "" {
 		return nil, fmt.Errorf("fs: directory is required")
 	}
@@ -35,7 +63,7 @@ func New(directory string) (*Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Backend{root: root}, nil
+	return &Backend{root: root, limiter: limiter}, nil
 }
 func (b *Backend) Close() error { return b.root.Close() }
 
@@ -63,7 +91,7 @@ func (b *Backend) Put(ctx context.Context, object storage.Object, body io.ReadSe
 	if object.Size < 0 || body == nil {
 		return fmt.Errorf("fs: invalid body or size")
 	}
-	if err := ctx.Err(); err != nil {
+	if err := b.limiter.Allow(ctx, Operations); err != nil {
 		return err
 	}
 	header, err := json.Marshal(object)
@@ -174,6 +202,9 @@ func (b *Backend) Get(ctx context.Context, key string) (storage.Object, io.ReadC
 	if err := storage.ValidateKey(key); err != nil {
 		return storage.Object{}, nil, err
 	}
+	if err := b.limiter.Allow(ctx, Operations); err != nil {
+		return storage.Object{}, nil, err
+	}
 	object, body, err := b.open(ctx, filename(key))
 	if err == nil && object.Key != key {
 		body.Close()
@@ -186,7 +217,7 @@ func (b *Backend) Delete(ctx context.Context, key string) error {
 	if err := storage.ValidateKey(key); err != nil {
 		return err
 	}
-	if err := ctx.Err(); err != nil {
+	if err := b.limiter.Allow(ctx, Operations); err != nil {
 		return err
 	}
 	if err := b.root.Remove(filename(key)); err != nil {
@@ -199,7 +230,7 @@ func (b *Backend) Delete(ctx context.Context, key string) error {
 }
 
 func (b *Backend) List(ctx context.Context) ([]storage.Object, error) {
-	if err := ctx.Err(); err != nil {
+	if err := b.limiter.Allow(ctx, Operations); err != nil {
 		return nil, err
 	}
 	dir, err := b.root.Open(".")

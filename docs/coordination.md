@@ -7,8 +7,8 @@ privado para cada `Storage`.
 
 ## Estado y operaciones atómicas
 
-El estado persistente mínimo por scope contiene límites, tamaños confirmados
-por clave, reservas pendientes y eventos admitidos para la ventana de operaciones.
+El estado persistente mínimo por scope de bytes contiene límites, tamaños
+confirmados por clave y reservas pendientes.
 Los tamaños y sumas deben validarse para impedir desbordamientos de enteros.
 
 `Initialize` se ejecuta antes de usar la instancia. Debe inicializar un scope una
@@ -17,11 +17,6 @@ posteriores deben comprobar que los límites coinciden y reutilizar el estado;
 no deben sobrescribirlo con otro listado ni borrar reservas activas. Si la
 inicialización falla, debe poder reintentarse. El namespace puede comenzar por
 encima de su cuota: no se permite crecer, pero sí reducir o borrar objetos.
-
-`Allow` admite una operación y actualiza atómicamente la ventana compartida.
-Una llamada admitida no se devuelve al presupuesto aunque falle después.
-La ventana es deslizante y abarca todas las operaciones lógicas públicas;
-las peticiones internas de S3 y los escaneos iniciales quedan fuera.
 
 `Reserve` debe, en una sola transacción:
 
@@ -59,9 +54,9 @@ no mantienen ese mutex. Las mutaciones de claves ocupadas se rechazan con
 ## Errores y recuperación
 
 Los backends garantizan que un error ordinario no modificó el objeto. Cuando
-no pueden demostrarlo deben envolver `ErrOutcomeUnknown`. El backend S3 trata
-conservadoramente cualquier error posterior a invocar la mutación del SDK como
-incierto, porque los reintentos pueden ocultar un intento exitoso anterior.
+no pueden demostrarlo deben envolver `ErrOutcomeUnknown`. El backend S3 conserva el resultado como incierto si hubo algún intento HTTP
+enviado y la llamada terminó con error. Si se rechazó antes del primer envío,
+no hubo cambio. Un reintento bloqueado puede ocultar un intento exitoso anterior.
 
 - Error conocido sin cambio: la librería completa con `Unchanged`.
 - Éxito del backend: completa con `Applied`.
@@ -111,3 +106,51 @@ La publicación y el borrado deben respetar la semántica de errores anterior.
 Los límites contemplan cuerpos lógicos actuales. No equivalen a una cuota física
 ni monetaria: archivos temporales, metadata, versiones históricas, partes de
 multipart y operaciones internas del proveedor pueden consumir recursos extra.
+
+## Presupuestos de operaciones en v3
+
+`Storage` no admite ni cuenta operaciones. `storage.Limits` solo contiene
+`MaxBytes` y `storage.Coordinator` ya no tiene Allow. Los backends reciben
+`WithRateLimits(ratelimit.Options)` y usan un coordinador independiente:
+
+```go
+type Coordinator interface {
+    Allow(ctx context.Context, scope string, category ratelimit.Category, limit ratelimit.Limit) error
+}
+```
+
+Cada admisión debe comprobar y cargar atómicamente una ventana deslizante por
+scope y categoría. Rechazar con `ratelimit.ErrLimited` sin esperar capacidad,
+no devolver cargos cuando falle el envío y detectar límites incompatibles en
+un presupuesto compartido. El coordinador no requiere escaneo del almacenamiento:
+puede admitir peticiones incluso durante la inicialización de la cuota de bytes.
+Una falla debe impedir el envío. Las categorías no configuradas son ilimitadas.
+Todos los usuarios de un presupuesto deben configurar las mismas categorías y
+límites; omitir una categoría desactiva su control en esa instancia.
+
+En S3 se consulta antes de cada dispatch HTTP, incluyendo reintentos del SDK,
+páginas e inicialización. Los clientes estándar HTTP también admiten cada
+redirección. Los reenvíos ocultos dentro de un transporte personalizado o del
+transporte subyacente quedan fuera de la visibilidad de esta capa; no deben
+usarse para implementar reintentos de aplicación. El SDK sí queda instrumentado.
+Filesystem cuenta una vez cada operación pública de backend, con un único
+presupuesto `fs.Operations`.
+
+Para R2, el scope de operaciones puede identificar la cuenta completa y abarcar
+varios buckets. El scope de bytes sigue identificando un namespace concreto;
+no debe reutilizarse para buckets diferentes. Un mismo coordinador de operaciones
+puede tener presupuestos independientes para escrituras/listados y lecturas.
+Los borrados son ilimitados salvo que se configure `s3.FreeRequests`.
+
+Las implementaciones en memoria pierden el historial al reiniciar. Para mantener
+límites entre procesos o reinicios hay que persistir eventos y reservas en los
+respectivos coordinadores. Un límite por ocho horas no reemplaza la contabilidad
+mensual del proveedor ni contempla clientes externos a estos backends.
+
+## Migración desde v2
+
+Cambiar imports a `/v3`, eliminar `storage.Limits.Rate` y trasladar sus
+presupuestos al constructor del backend. Separar la implementación anterior
+`storage.Coordinator.Allow` hacia `ratelimit.Coordinator.Allow`, que ahora recibe
+categoría y límite. `s3.New` recibe `*awss3.Client`, no la antigua interfaz Client,
+para garantizar que el SDK aplique las opciones de instrumentación de cada llamada.

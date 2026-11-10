@@ -11,8 +11,8 @@ go vet ./...
 ## MinIO en Docker
 
 Las pruebas de integración crean buckets aislados y los eliminan al terminar.
-Usan el cliente AWS normal, sin middleware especial de payload ni cambios a la
-configuración global del entorno. Las subidas sin tamaño declarado se preparan
+Usan el cliente AWS normal, con instrumentación por llamada del transporte HTTP,
+sin middleware especial de payload ni cambios globales del entorno. Las subidas sin tamaño declarado se preparan
 antes de enviar y tienen Content-Length; el lector es seekable para el SDK.
 
 Para reproducir el entorno usado, compilar una versión fija de MinIO y construir
@@ -43,7 +43,8 @@ caché Go de solo lectura se puede añadir `GOCACHE=/tmp/go-storage-build`.
 
 - 64 subidas concurrentes sin tamaño declarado de 64 KiB, dos instancias con
   coordinador compartido y cuota de 512 KiB: exactamente ocho admitidas.
-- Ventana de operaciones compartida entre instancias, con admisión concurrente.
+- Ventanas de operaciones por categoría en los backends, compartidas entre
+  instancias y buckets, con admisión concurrente.
 - Lectura, listado, contenido, metadata, SHA-256, objetos vacíos y claves anidadas.
 - Borrados repetidos, sobrescrituras que reducen tamaño y carga de estado existente.
 - Sobrescritura detenida después de reservar: otra sobrescritura o borrado de la
@@ -62,9 +63,6 @@ caché Go de solo lectura se puede añadir `GOCACHE=/tmp/go-storage-build`.
 - S3: inicialización y listado de 1005 objetos, verificando que la cuota incluya
   los objetos de todas las páginas.
 
-Validación de esta reescritura: `go test -race ./...`, `go vet ./...` y cinco
-repeticiones de `go test -tags=integration -race -count=5 ./...` contra MinIO
-pasaron sin avisos del detector de carreras.
 
 Las pruebas compartidas están en [internal/storagetest/suite.go](../internal/storagetest/suite.go).
 La integración S3 está en [backends/s3/minio_integration_test.go](../backends/s3/minio_integration_test.go).
@@ -74,3 +72,33 @@ Las pruebas originales anteriores a la reescritura demostraron excedentes de
 La suite actual exige corregir esos comportamientos en vez de aceptarlos.
 No valida un coordinador distribuido de terceros, acceso real a AWS/R2, HTTPS,
 caídas físicas de disco ni publicación tardía de un servidor remoto real.
+
+## Conteo por backend (v3)
+
+`backends/s3/limits_test.go` usa servidores HTTP locales y el SDK real para
+verificar peticiones observadas, no solo llamadas al coordinador:
+
+- Put y cada página de List comparten presupuesto; Get usa uno independiente.
+- Cada reintento del SDK consume capacidad, tanto con su transporte por defecto
+  como con un cliente HTTP estándar. Una petición rechazada no llega al servidor.
+- Redirecciones de un cliente estándar no eluden el presupuesto.
+- Borrados gratuitos funcionan aunque se agoten escrituras y lecturas.
+- 64 llamadas concurrentes a dos backends/buckets con un presupuesto compartido
+  de ocho peticiones envían exactamente ocho solicitudes.
+- El escaneo inicial consume presupuesto. Un rechazo antes del primer envío
+  libera los bytes; un rechazo de reintento conserva la reserva incierta.
+- Un fallo del coordinador de operaciones impide enviar una mutación.
+
+`backends/fs/limits_test.go` comprueba el presupuesto concurrente compartido,
+listados con varios objetos contados una sola vez y preservación de objetos
+cuando se rechaza la escritura. `ratelimit/ratelimit_test.go` verifica fronteras
+de ventana con reloj controlado, categorías y scopes independientes, concurrencia,
+conflictos de configuración, cancelación y copia inmutable de límites.
+
+Las pruebas HTTP unitarias requieren poder abrir puertos locales; no contactan
+servicios externos. MinIO además verifica límites por categoría e inicialización,
+borrados gratuitos y bytes reales conservados después de una escritura rechazada.
+
+Validación de v3: `go vet ./...` y cinco repeticiones de
+`MINIO_TEST_ENDPOINT=http://127.0.0.1:19000 go test -tags=integration -race -count=5 ./...`
+pasaron con MinIO en Docker, sin avisos de carreras de memoria.

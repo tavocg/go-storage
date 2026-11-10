@@ -12,28 +12,25 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
-	storage "github.com/tavocg/go-storage/v2"
+	storage "github.com/tavocg/go-storage/v3"
+	"github.com/tavocg/go-storage/v3/ratelimit"
 )
 
-// Client is the AWS SDK surface used by Backend. The application configures
-// credentials, endpoint, region, path-style addressing, retry and HTTP policies.
-type Client interface {
-	PutObject(context.Context, *awss3.PutObjectInput, ...func(*awss3.Options)) (*awss3.PutObjectOutput, error)
-	GetObject(context.Context, *awss3.GetObjectInput, ...func(*awss3.Options)) (*awss3.GetObjectOutput, error)
-	DeleteObject(context.Context, *awss3.DeleteObjectInput, ...func(*awss3.Options)) (*awss3.DeleteObjectOutput, error)
-	ListObjectsV2(context.Context, *awss3.ListObjectsV2Input, ...func(*awss3.Options)) (*awss3.ListObjectsV2Output, error)
-}
-
 type Backend struct {
-	client Client
-	bucket string
+	client  *awss3.Client
+	bucket  string
+	limiter *ratelimit.Limiter
 }
 
-func New(client Client, bucket string) (*Backend, error) {
+func New(client *awss3.Client, bucket string, opts ...Option) (*Backend, error) {
 	if client == nil || strings.TrimSpace(bucket) == "" {
 		return nil, fmt.Errorf("s3: client and bucket are required")
 	}
-	return &Backend{client: client, bucket: bucket}, nil
+	limiter, err := newLimiter(opts)
+	if err != nil {
+		return nil, err
+	}
+	return &Backend{client: client, bucket: bucket, limiter: limiter}, nil
 }
 
 func (b *Backend) Put(ctx context.Context, object storage.Object, body io.ReadSeeker) error {
@@ -66,13 +63,14 @@ func (b *Backend) Put(ctx context.Context, object storage.Object, body io.ReadSe
 	if object.ContentType != "" {
 		input.ContentType = aws.String(object.ContentType)
 	}
-	_, err = b.client.PutObject(ctx, input)
-	// SDK retries can obscure a previous successful attempt with a lost response.
-	// Conservatively retain reservations on every error after invoking the SDK.
-	if err != nil {
+	tracker := &requestTracker{limiter: b.limiter, category: WriteRequests}
+	_, err = b.client.PutObject(ctx, input, tracker.options)
+	// A blocked first attempt is unchanged; any transmitted mutation can be
+	// uncertain, including when a later retry was blocked by the rate limit.
+	if err != nil && tracker.sent.Load() {
 		return errors.Join(storage.ErrOutcomeUnknown, err)
 	}
-	return nil
+	return err
 }
 
 func (b *Backend) Get(ctx context.Context, key string) (storage.Object, io.ReadCloser, error) {
@@ -82,7 +80,8 @@ func (b *Backend) Get(ctx context.Context, key string) (storage.Object, io.ReadC
 	if err := ctx.Err(); err != nil {
 		return storage.Object{}, nil, err
 	}
-	output, err := b.client.GetObject(ctx, &awss3.GetObjectInput{Bucket: aws.String(b.bucket), Key: aws.String(key)})
+	tracker := &requestTracker{limiter: b.limiter, category: ReadRequests}
+	output, err := b.client.GetObject(ctx, &awss3.GetObjectInput{Bucket: aws.String(b.bucket), Key: aws.String(key)}, tracker.options)
 	if err != nil {
 		var api smithy.APIError
 		if errors.As(err, &api) && (api.ErrorCode() == "NoSuchKey" || api.ErrorCode() == "NotFound") {
@@ -100,18 +99,20 @@ func (b *Backend) Delete(ctx context.Context, key string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	_, err := b.client.DeleteObject(ctx, &awss3.DeleteObjectInput{Bucket: aws.String(b.bucket), Key: aws.String(key)})
-	if err != nil {
+	tracker := &requestTracker{limiter: b.limiter, category: FreeRequests}
+	_, err := b.client.DeleteObject(ctx, &awss3.DeleteObjectInput{Bucket: aws.String(b.bucket), Key: aws.String(key)}, tracker.options)
+	if err != nil && tracker.sent.Load() {
 		return errors.Join(storage.ErrOutcomeUnknown, err)
 	}
-	return nil
+	return err
 }
 
 func (b *Backend) List(ctx context.Context) ([]storage.Object, error) {
 	paginator := awss3.NewListObjectsV2Paginator(b.client, &awss3.ListObjectsV2Input{Bucket: aws.String(b.bucket)})
 	objects := make([]storage.Object, 0)
+	tracker := &requestTracker{limiter: b.limiter, category: WriteRequests}
 	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
+		page, err := paginator.NextPage(ctx, tracker.options)
 		if err != nil {
 			return nil, err
 		}

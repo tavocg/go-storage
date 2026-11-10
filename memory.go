@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"sync"
-	"time"
 )
 
 // MemoryCoordinator coordinates instances in this process only. Share one
@@ -23,7 +22,6 @@ type memoryScope struct {
 	reserved int64
 	pending  map[string]*memoryReservation
 	ids      map[string]bool
-	calls    []time.Time
 }
 type memoryReservation struct {
 	coordinator *MemoryCoordinator
@@ -37,9 +35,8 @@ type memoryReservation struct {
 func NewMemoryCoordinator() *MemoryCoordinator { return &MemoryCoordinator{} }
 
 func validateLimits(l Limits) error {
-	if l.MaxBytes < 0 || l.Rate.Operations < 0 || l.Rate.Interval < 0 ||
-		(l.Rate.Operations == 0) != (l.Rate.Interval == 0) {
-		return fmt.Errorf("storage: invalid limits")
+	if l.MaxBytes < 0 {
+		return fmt.Errorf("storage: invalid byte limit")
 	}
 	return nil
 }
@@ -114,40 +111,6 @@ func scanScope(ctx context.Context, limits Limits, scan func(context.Context) (m
 		return nil, err
 	}
 	return s, nil
-}
-
-func (c *MemoryCoordinator) Allow(ctx context.Context, scope string, op Operation) error {
-	if op != OperationPut && op != OperationGet && op != OperationDelete && op != OperationList {
-		return fmt.Errorf("storage: invalid operation")
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	s := c.scopes[scope]
-	if s == nil {
-		return fmt.Errorf("storage: uninitialized scope")
-	}
-	rate := s.limits.Rate
-	if rate.Operations == 0 {
-		return nil
-	}
-	now := time.Now()
-	cutoff := now.Add(-rate.Interval)
-	expired := 0
-	for expired < len(s.calls) && !s.calls[expired].After(cutoff) {
-		expired++
-	}
-	if expired > 0 {
-		copy(s.calls, s.calls[expired:])
-		s.calls = s.calls[:len(s.calls)-expired]
-	}
-	if len(s.calls) >= rate.Operations {
-		return &RateLimitError{RetryAfter: s.calls[0].Add(rate.Interval).Sub(now)}
-	}
-	s.calls = append(s.calls, now)
-	return nil
 }
 
 func (c *MemoryCoordinator) Reserve(ctx context.Context, m Mutation) (Reservation, error) {

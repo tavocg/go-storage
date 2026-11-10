@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	storage "github.com/tavocg/go-storage/v2"
-	"github.com/tavocg/go-storage/v2/backends/fs"
-	"github.com/tavocg/go-storage/v2/internal/storagetest"
+	storage "github.com/tavocg/go-storage/v3"
+	"github.com/tavocg/go-storage/v3/backends/fs"
+	"github.com/tavocg/go-storage/v3/internal/storagetest"
 )
 
 func filesystem(t *testing.T) storage.Backend {
@@ -135,56 +135,37 @@ func TestUnknownUnchangedCanBeRecovered(t *testing.T) {
 	storagetest.Put(t, s, "fits", 10)
 }
 
-type unavailableCoordinator struct {
-	storage.Coordinator
-	denyAllow bool
-}
+type unavailableCoordinator struct{ storage.Coordinator }
 
-func (c unavailableCoordinator) Allow(ctx context.Context, scope string, op storage.Operation) error {
-	if c.denyAllow {
-		return errors.New("offline")
-	}
-	return c.Coordinator.Allow(ctx, scope, op)
-}
 func (c unavailableCoordinator) Reserve(context.Context, storage.Mutation) (storage.Reservation, error) {
 	return nil, errors.New("offline")
 }
-
 func TestCoordinatorFailuresFailClosed(t *testing.T) {
-	for _, deny := range []bool{true, false} {
-		t.Run(map[bool]string{true: "allow", false: "reserve"}[deny], func(t *testing.T) {
-			b := filesystem(t)
-			c := unavailableCoordinator{Coordinator: storage.NewMemoryCoordinator(), denyAllow: deny}
-			s := storagetest.New(t, b, storage.Options{Coordinator: c})
-			if _, err := s.Put(t.Context(), "blocked", strings.NewReader("data")); !errors.Is(err, storage.ErrCoordination) {
-				t.Fatal(err)
-			}
-			storagetest.AssertBytes(t, b, 0)
-		})
+	b := filesystem(t)
+	c := unavailableCoordinator{Coordinator: storage.NewMemoryCoordinator()}
+	s := storagetest.New(t, b, storage.Options{Coordinator: c})
+	if _, err := s.Put(t.Context(), "blocked", strings.NewReader("data")); !errors.Is(err, storage.ErrCoordination) {
+		t.Fatal(err)
 	}
+	storagetest.AssertBytes(t, b, 0)
 }
 
 func TestDefaultCoordinatorIsPrivate(t *testing.T) {
 	b := filesystem(t)
-	opts := storage.Options{Scope: "same", Limits: storage.Limits{Rate: storage.RateLimit{Operations: 1, Interval: time.Hour}}}
+	opts := storage.Options{Scope: "same", Limits: storage.Limits{MaxBytes: 10}}
 	first := storagetest.New(t, b, opts)
 	second := storagetest.New(t, b, opts)
-	if _, err := first.List(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := first.List(t.Context()); !errors.Is(err, storage.ErrRateLimited) {
-		t.Fatal(err)
-	}
-	if _, err := second.List(t.Context()); err != nil {
-		t.Fatal("default instance shares hidden global state:", err)
-	}
+	storagetest.Put(t, first, "first", 6)
+	// Neither private coordinator knows about writes through the other instance.
+	// Sharing a namespace safely requires explicitly sharing the coordinator.
+	storagetest.Put(t, second, "second", 6)
+	storagetest.AssertBytes(t, b, 12)
 }
 
-func TestValidationAndFailedAttemptsCount(t *testing.T) {
+func TestValidationAndReaderErrors(t *testing.T) {
 	b := filesystem(t)
 	invalid := []storage.Options{
 		{}, {Scope: "x", Limits: storage.Limits{MaxBytes: -1}},
-		{Scope: "x", Limits: storage.Limits{Rate: storage.RateLimit{Operations: 1}}},
 		{Scope: "x", FinalizeTimeout: -time.Second},
 	}
 	for _, opts := range invalid {
@@ -195,14 +176,12 @@ func TestValidationAndFailedAttemptsCount(t *testing.T) {
 	if _, err := storage.New(t.Context(), nil, storage.Options{Scope: "x"}); err == nil {
 		t.Fatal("nil backend accepted")
 	}
-	s := storagetest.New(t, b, storage.Options{Limits: storage.Limits{Rate: storage.RateLimit{Operations: 1, Interval: time.Hour}}})
+	s := storagetest.New(t, b, storage.Options{Limits: storage.Limits{MaxBytes: 10}})
 	if _, err := s.Put(t.Context(), "", bytes.NewReader(nil)); !errors.Is(err, storage.ErrInvalidKey) {
 		t.Fatal(err)
 	}
 	if _, err := s.Put(t.Context(), "read-failure", failedReader{}); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatal(err)
 	}
-	if _, err := s.List(t.Context()); !errors.Is(err, storage.ErrRateLimited) {
-		t.Fatal("read failure refunded operation:", err)
-	}
+	storagetest.Put(t, s, "fits", 10)
 }

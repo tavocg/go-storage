@@ -1,31 +1,18 @@
 package storage
 
-import (
-	"context"
-	"time"
-)
+import "context"
 
 type Operation string
 
 const (
 	OperationPut    Operation = "put"
-	OperationGet    Operation = "get"
 	OperationDelete Operation = "delete"
-	OperationList   Operation = "list"
 )
-
-// RateLimit is a strict sliding-window limit over logical API calls, not over
-// backend HTTP requests. Zero Operations and Interval disable the rate limit.
-type RateLimit struct {
-	Operations int
-	Interval   time.Duration
-}
 
 // Limits apply to an entire Scope. Zero MaxBytes disables the byte quota.
 // Historical versions, multipart parts and staging files are excluded.
 type Limits struct {
 	MaxBytes int64
-	Rate     RateLimit
 }
 
 // Mutation exclusively owns Key and reserves its positive size increase.
@@ -66,10 +53,6 @@ type Coordinator interface {
 	// reloading state or discarding pending reservations. scan must not overlap
 	// coordinated mutations of that scope during initialization.
 	Initialize(ctx context.Context, scope string, limits Limits, scan func(context.Context) (map[string]int64, error)) error
-	// Allow atomically charges one admitted operation. Charges are not refunded,
-	// even if staging, quota checks or backend calls fail. Reject immediately
-	// with ErrRateLimited instead of sleeping.
-	Allow(ctx context.Context, scope string, operation Operation) error
 	// Reserve atomically owns the key and checks committed bytes plus positive
 	// reserved deltas against MaxBytes. Reject busy keys with ErrObjectBusy.
 	// Do not release committed size until Complete confirms a successful change.

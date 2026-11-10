@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	storage "github.com/tavocg/go-storage/v2"
-	"github.com/tavocg/go-storage/v2/backends/fs"
-	"github.com/tavocg/go-storage/v2/internal/storagetest"
+	storage "github.com/tavocg/go-storage/v3"
+	"github.com/tavocg/go-storage/v3/backends/fs"
+	"github.com/tavocg/go-storage/v3/internal/storagetest"
 )
 
 func backend(t *testing.T) storage.Backend {
