@@ -3,12 +3,10 @@ package storage
 import (
 	"errors"
 	"fmt"
-	"time"
 )
 
 var (
 	ErrQuotaExceeded      = errors.New("storage: byte quota exceeded")
-	ErrRateLimited        = errors.New("storage: operation rate exceeded")
 	ErrObjectBusy         = errors.New("storage: object has a pending mutation")
 	ErrNotFound           = errors.New("storage: object not found")
 	ErrInvalidKey         = errors.New("storage: invalid object key")
@@ -18,14 +16,6 @@ var (
 	ErrConflictingLimits  = errors.New("storage: conflicting limits for scope")
 	ErrInvalidReservation = errors.New("storage: invalid reservation")
 )
-
-// RateLimitError gives the delay until the oldest operation leaves the window.
-type RateLimitError struct{ RetryAfter time.Duration }
-
-func (e *RateLimitError) Error() string {
-	return fmt.Sprintf("%v (retry after %s)", ErrRateLimited, e.RetryAfter)
-}
-func (e *RateLimitError) Unwrap() error { return ErrRateLimited }
 
 // PendingError means a mutation needs recovery. Its reservation remains held
 // unless a finalization retry already completed it. After fencing the original

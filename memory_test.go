@@ -45,34 +45,6 @@ func TestMemoryInitializeOnceAndPreserveReservations(t *testing.T) {
 	}
 }
 
-func TestMemoryRateWindowAndScopeIsolation(t *testing.T) {
-	c := NewMemoryCoordinator()
-	limits := Limits{Rate: RateLimit{Operations: 1, Interval: time.Hour}}
-	empty := func(context.Context) (map[string]int64, error) { return nil, nil }
-	for _, scope := range []string{"one", "two"} {
-		if err := c.Initialize(t.Context(), scope, limits, empty); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := c.Allow(t.Context(), "one", OperationGet); err != nil {
-		t.Fatal(err)
-	}
-	var limited *RateLimitError
-	if err := c.Allow(t.Context(), "one", OperationPut); !errors.As(err, &limited) || limited.RetryAfter <= 0 {
-		t.Fatalf("rate error: %v", err)
-	}
-	if err := c.Allow(t.Context(), "two", OperationGet); err != nil {
-		t.Fatal("scopes share limit:", err)
-	}
-	// Move the recorded event outside the window without a timing-sensitive sleep.
-	c.mu.Lock()
-	c.scopes["one"].calls[0] = time.Now().Add(-2 * time.Hour)
-	c.mu.Unlock()
-	if err := c.Allow(t.Context(), "one", OperationList); err != nil {
-		t.Fatal("window did not expire:", err)
-	}
-}
-
 func TestMemoryOverflowAndInitiallyOverQuota(t *testing.T) {
 	c := NewMemoryCoordinator()
 	scan := func(context.Context) (map[string]int64, error) { return map[string]int64{"old": math.MaxInt64}, nil }
@@ -151,7 +123,13 @@ func TestMemoryInitializationDoesNotBlockOtherScopes(t *testing.T) {
 		t.Fatal(err)
 	}
 	allowed := make(chan error, 1)
-	go func() { allowed <- c.Allow(t.Context(), "ready", OperationGet) }()
+	go func() {
+		r, err := c.Reserve(t.Context(), Mutation{Scope: "ready", ID: "other-scope", Key: "key", Operation: OperationPut, Size: 1})
+		if err == nil {
+			err = r.Complete(t.Context(), Unchanged)
+		}
+		allowed <- err
+	}()
 	select {
 	case err := <-allowed:
 		if err != nil {

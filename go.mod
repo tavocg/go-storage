@@ -1,4 +1,4 @@
-module github.com/tavocg/go-storage/v2
+module github.com/tavocg/go-storage/v3
 
 go 1.26.3
 

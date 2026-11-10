@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	storage "github.com/tavocg/go-storage/v2"
+	storage "github.com/tavocg/go-storage/v3"
 )
 
 type Factory func(*testing.T) storage.Backend
@@ -248,28 +248,6 @@ func Run(t *testing.T, factory Factory) {
 		}
 		AssertBytes(t, b, 4)
 		Put(t, s, "empty", 0)
-	})
-	t.Run("shared-operation-limit", func(t *testing.T) {
-		b := factory(t)
-		c := storage.NewMemoryCoordinator()
-		opts := storage.Options{Scope: "rate", Coordinator: c, Limits: storage.Limits{Rate: storage.RateLimit{Operations: 8, Interval: time.Hour}}}
-		stores := []*storage.Storage{New(t, b, opts), New(t, b, opts)}
-		var admitted atomic.Int64
-		var wg sync.WaitGroup
-		for i := range 64 {
-			wg.Go(func() {
-				_, _, err := stores[i%2].Get(t.Context(), "missing")
-				if errors.Is(err, storage.ErrNotFound) {
-					admitted.Add(1)
-				} else if !errors.Is(err, storage.ErrRateLimited) {
-					t.Errorf("get: %v", err)
-				}
-			})
-		}
-		wg.Wait()
-		if admitted.Load() != 8 {
-			t.Fatalf("admitted=%d", admitted.Load())
-		}
 	})
 }
 

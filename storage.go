@@ -126,7 +126,7 @@ func (s *Storage) Put(ctx context.Context, key string, body io.Reader, opts ...P
 	if options.limit < -1 {
 		return Object{}, fmt.Errorf("storage: invalid upload limit")
 	}
-	if err := s.allow(ctx, OperationPut); err != nil {
+	if err := ctx.Err(); err != nil {
 		return Object{}, err
 	}
 	file, object, err := s.stage(ctx, key, body, options)
@@ -155,28 +155,28 @@ func (s *Storage) Get(ctx context.Context, key string) (Object, io.ReadCloser, e
 	if err := ValidateKey(key); err != nil {
 		return Object{}, nil, err
 	}
-	if err := s.allow(ctx, OperationGet); err != nil {
+	if err := ctx.Err(); err != nil {
 		return Object{}, nil, err
 	}
 	return s.backend.Get(ctx, key)
 }
 
 // List returns the backend's current objects, not a cached coordinator view.
-// One call counts as one operation even if the backend uses multiple pages.
+// Operation admission and pagination accounting belong to the backend.
 func (s *Storage) List(ctx context.Context) ([]Object, error) {
-	if err := s.allow(ctx, OperationList); err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	return s.backend.List(ctx)
 }
 
 // Delete is idempotent, including for accounting. The backend is still called
-// for missing keys, and each admitted call counts toward the operation limit.
+// for missing keys. The backend decides how to count that call.
 func (s *Storage) Delete(ctx context.Context, key string) error {
 	if err := ValidateKey(key); err != nil {
 		return err
 	}
-	if err := s.allow(ctx, OperationDelete); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	m := Mutation{Scope: s.options.Scope, ID: rand.Text(), Key: key, Operation: OperationDelete}
@@ -188,16 +188,6 @@ func (s *Storage) Delete(ctx context.Context, key string) error {
 		return fmt.Errorf("%w: nil reservation", ErrCoordination)
 	}
 	return s.finish(ctx, m, r, s.backend.Delete(ctx, key))
-}
-
-func (s *Storage) allow(ctx context.Context, op Operation) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := s.coordinator.Allow(ctx, s.options.Scope, op); err != nil {
-		return errors.Join(ErrCoordination, err)
-	}
-	return nil
 }
 
 func (s *Storage) finish(ctx context.Context, m Mutation, r Reservation, backendErr error) error {
